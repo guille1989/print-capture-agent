@@ -1,0 +1,22 @@
+{
+  "name": "print-capture-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Servicio Windows: detecta puertos, captura tickets impresos y sube el crudo a la nube (el parseo vive en el servidor). Reporta su estado al agent-status-viewer.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx --env-file=.env src/index.ts",
+    "test": "tsx --test"
+  },
+  "dependencies": {
+    "print-capture-agent-pipe-server": "file:../print-capture-agent-pipe-server",
+    "serialport": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
