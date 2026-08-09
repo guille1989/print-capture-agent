@@ -19,11 +19,50 @@ function parseTcpPeripherals(): TcpPeripheral[] {
   }
 }
 
+function apiSibling(path: string): string {
+  try {
+    const url = new URL(process.env.CLOUD_UPLOAD_URL ?? "https://example.invalid/api/tickets");
+    // Sin la barra inicial en el patrón, la reemplazada se come el "/" que
+    // separaba "/tickets" del resto — "/prod/tickets" quedaba
+    // "/prodagents/activate" en vez de "/prod/agents/activate". API
+    // Gateway responde 403 "Forbidden" para una ruta que no existe (nunca
+    // llega a invocar el Lambda), así que este bug se manifestaba como un
+    // 403 en la activación/heartbeat sin ninguna pista en el body.
+    url.pathname = url.pathname.replace(/tickets\/?$/, path);
+    return url.toString();
+  } catch {
+    return `https://example.invalid/api/${path}`;
+  }
+}
+
+function optionalNumber(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
+}
+
 export const config = {
   agentName: "print-capture-agent",
   agentVersion: "0.1.0",
   cloudUploadUrl: process.env.CLOUD_UPLOAD_URL ?? "https://example.invalid/api/tickets",
   cloudApiKey: process.env.CLOUD_API_KEY,
+  activationUrl: process.env.CLOUD_ACTIVATION_URL ?? apiSibling("agents/activate"),
+  heartbeatUrl: process.env.CLOUD_HEARTBEAT_URL ?? apiSibling("agents/heartbeat"),
+  credentialsFilePath: process.env.AGENT_CREDENTIALS_FILE ?? "./data/credentials.json",
+  heartbeatIntervalMs: Number(process.env.HEARTBEAT_INTERVAL_MS) || 60 * 1000,
+  // La ubicación se administra normalmente desde InnoApp Web. Si esta
+  // instalación no declara ninguna variable, se omite del heartbeat para
+  // no borrar la ubicación persistida por el negocio con un objeto vacío.
+  location: (() => {
+    const value = {
+      label: process.env.AGENT_LOCATION_LABEL,
+      city: process.env.AGENT_CITY,
+      lat: optionalNumber("AGENT_LAT"),
+      lng: optionalNumber("AGENT_LNG"),
+    };
+    return Object.values(value).some((item) => item !== undefined) ? value : undefined;
+  })(),
   queueFilePath: process.env.QUEUE_FILE ?? "./data/queue.json",
   idleThresholdMs: 5 * 60 * 1000,
   portScanIntervalMs: 10 * 1000,

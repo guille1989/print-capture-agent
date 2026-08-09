@@ -7,6 +7,8 @@ import { captureTcp } from "./capture/tcpCapture.js";
 import { CaptureHandle } from "./capture/types.js";
 import { classifyFailure, computeBackoffMs } from "./cloud/backoff.js";
 import { uploadTicket } from "./cloud/uploadClient.js";
+import { ensureCredentials, type AgentCredentials } from "./cloud/credentials.js";
+import { sendHeartbeat } from "./cloud/heartbeatClient.js";
 import { config } from "./config.js";
 import { scanPorts } from "./ports/portScanner.js";
 import { LocalQueue } from "./queue/localQueue.js";
@@ -36,6 +38,7 @@ const pipe = new AgentPipeServer({
 const queue = new LocalQueue<RawTicket>(config.queueFilePath);
 const captures = new Map<string, CaptureHandle>();
 const knownPortIds = new Set<string>();
+let credentials: AgentCredentials;
 
 /** Los periféricos TCP son estáticos (no se "descubren"), así que se
  * reportan siempre junto con los puertos serie detectados dinámicamente. */
@@ -96,7 +99,7 @@ async function syncQueueToCloud(): Promise<void> {
     const result = await uploadTicket(
       {
         url: config.cloudUploadUrl,
-        apiKey: config.cloudApiKey,
+        apiKey: credentials.apiKey,
         timeoutMs: config.cloudUploadTimeoutMs,
       },
       record.payload,
@@ -124,6 +127,19 @@ async function syncQueueToCloud(): Promise<void> {
     anyFailure ? "error" : "ok",
     anyFailure ? "No se pudo conectar al backend en la nube" : undefined,
   );
+}
+
+function scheduleHeartbeatLoop(): void {
+  setTimeout(() => {
+    sendHeartbeat(
+      config.heartbeatUrl,
+      credentials.apiKey,
+      { name: credentials.name, version: config.agentVersion, location: config.location },
+      config.cloudUploadTimeoutMs,
+    )
+      .catch((err) => console.error("[agent] no se pudo enviar el heartbeat:", err))
+      .finally(scheduleHeartbeatLoop);
+  }, config.heartbeatIntervalMs);
 }
 
 async function refreshPorts(): Promise<void> {
@@ -240,6 +256,12 @@ async function main(): Promise<void> {
   // una forma segura de seguir — se deja que `main().catch()` de abajo
   // termine el proceso. Todo lo demás (escanear puertos, capturar,
   // sincronizar) usa `runDetached` para no arrastrar eso al arranque.
+  credentials = await ensureCredentials({
+    path: config.credentialsFilePath,
+    envApiKey: config.cloudApiKey,
+    activationUrl: config.activationUrl,
+    timeoutMs: config.cloudUploadTimeoutMs,
+  });
   await queue.load();
   pipe.start();
   startTcpCaptures();
@@ -252,6 +274,13 @@ async function main(): Promise<void> {
   }
   schedulePortScanLoop();
   scheduleSyncLoop();
+  await sendHeartbeat(
+    config.heartbeatUrl,
+    credentials.apiKey,
+    { name: credentials.name, version: config.agentVersion, location: config.location },
+    config.cloudUploadTimeoutMs,
+  ).catch((err) => console.error("[agent] no se pudo enviar el heartbeat inicial:", err));
+  scheduleHeartbeatLoop();
 
   console.log("[agent] print-capture-agent arrancado");
 }

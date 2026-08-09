@@ -102,7 +102,13 @@ ya no forma parte de este proyecto.
 | Variable | Default | Uso |
 |---|---|---|
 | `CLOUD_UPLOAD_URL` | `https://example.invalid/api/tickets` | endpoint al que se sube el texto crudo del ticket |
-| `CLOUD_API_KEY` | *(vacío)* | se manda en el header `x-api-key` si está seteada — es el header que espera API Gateway (`apiKeyRequired: true`), no `Authorization: Bearer` |
+| `CLOUD_API_KEY` | *(vacío)* | compatibilidad con instalaciones antiguas/no interactivas. En una instalación nueva se omite: el agente pide un código y guarda su propia key |
+| `CLOUD_ACTIVATION_URL` | derivada de `CLOUD_UPLOAD_URL` | `POST /agents/activate`, usado una sola vez al vincular el robot |
+| `CLOUD_HEARTBEAT_URL` | derivada de `CLOUD_UPLOAD_URL` | `POST /agents/heartbeat`, autenticado con la key individual |
+| `AGENT_CREDENTIALS_FILE` | `./data/credentials.json` | credencial individual persistida después de la activación (el directorio `data/` está ignorado por Git) |
+| `AGENT_NAME` | nombre de la PC | nombre sugerido en la activación; también se usa con `CLOUD_API_KEY` legacy |
+| `AGENT_LOCATION_LABEL`, `AGENT_CITY`, `AGENT_LAT`, `AGENT_LNG` | *(vacío)* | ubicación opcional que se envía en cada heartbeat y aparece en el dashboard |
+| `HEARTBEAT_INTERVAL_MS` | `60000` | frecuencia del heartbeat; el dashboard considera online hasta 2 minutos desde el último |
 | `QUEUE_FILE` | `./data/queue.json` | dónde persiste la cola local |
 | `ENABLE_CAPTURE` | `false` | en `"true"`, empieza a abrir los puertos detectados (y a conectar los periféricos TCP configurados) para leer datos. Mientras esté apagado, el agente solo identifica y reporta |
 | `TCP_PERIPHERALS` | `[]` | JSON con los periféricos TCP a conectar, ej. `[{"id":"datafono-caja1","description":"TPV caja 1","host":"192.168.1.50","port":9000}]` — no hay descubrimiento automático para estos, hay que declarar la IP |
@@ -113,6 +119,12 @@ ya no forma parte de este proyecto.
 npm install
 npm run start   # arranca el servicio (escanea puertos reales de esta PC)
 ```
+
+En el primer arranque interactivo, si no existe `CLOUD_API_KEY` ni el
+archivo de credenciales, se pide el código `XXXXX-XXXXX` y un nombre para
+el robot. El código se canjea una sola vez; los siguientes arranques leen
+`data/credentials.json` y no vuelven a preguntar. Para reactivar la misma
+instalación con otro código hay que retirar explícitamente ese archivo.
 
 Al arrancar, se conecta como servidor al pipe
 `\\.\pipe\print-capture-agent` — si el agent-status-viewer está abierto,
@@ -144,6 +156,4 @@ sin dependencias nuevas). Cubre:
 2. Recién con eso confirmado, prender `ENABLE_CAPTURE=true` y validar los
    supuestos de captura de la tabla de arriba (idealmente con datos de
    bajo riesgo primero, no en el POS de producción de un negocio real).
-3. Definir el contrato de `CLOUD_UPLOAD_URL`: qué payload exacto recibe
-   (hoy es `{ ticketId, port, capturedAt, rawText }`) y qué debería devolver.
-4. Escribir el parser real del lado del servidor (`ticket-parsing-cloud`).
+3. Escribir el parser real del lado del servidor (`ticket-parsing-cloud`).
