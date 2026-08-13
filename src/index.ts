@@ -142,6 +142,27 @@ function scheduleHeartbeatLoop(): void {
   }, config.heartbeatIntervalMs);
 }
 
+async function sendInitialHeartbeatWithRetry(): Promise<void> {
+  const retryDelaysMs = [0, 2_000, 5_000, 10_000];
+  let lastError: unknown;
+  for (const delayMs of retryDelaysMs) {
+    if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    try {
+      await sendHeartbeat(
+        config.heartbeatUrl,
+        credentials.apiKey,
+        { name: credentials.name, version: config.agentVersion, location: config.location },
+        config.cloudUploadTimeoutMs,
+      );
+      return;
+    } catch (err) {
+      lastError = err;
+      console.error(`[agent] no se pudo enviar el heartbeat inicial${delayMs ? ` tras reintento de ${delayMs / 1000}s` : ""}:`, err);
+    }
+  }
+  throw lastError;
+}
+
 async function refreshPorts(): Promise<void> {
   const detected = await scanPorts();
 
@@ -274,12 +295,7 @@ async function main(): Promise<void> {
   }
   schedulePortScanLoop();
   scheduleSyncLoop();
-  await sendHeartbeat(
-    config.heartbeatUrl,
-    credentials.apiKey,
-    { name: credentials.name, version: config.agentVersion, location: config.location },
-    config.cloudUploadTimeoutMs,
-  ).catch((err) => console.error("[agent] no se pudo enviar el heartbeat inicial:", err));
+  await sendInitialHeartbeatWithRetry().catch((err) => console.error("[agent] se agotaron los reintentos del heartbeat inicial:", err));
   scheduleHeartbeatLoop();
 
   console.log("[agent] print-capture-agent arrancado");
