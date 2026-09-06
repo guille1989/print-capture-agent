@@ -44,7 +44,7 @@ function optionalNumber(name: string): number | undefined {
 
 export const config = {
   agentName: "print-capture-agent",
-  agentVersion: "0.1.0",
+  agentVersion: "0.2.0",
   cloudUploadUrl: process.env.CLOUD_UPLOAD_URL ?? "https://example.invalid/api/tickets",
   cloudApiKey: process.env.CLOUD_API_KEY,
   activationUrl: process.env.CLOUD_ACTIVATION_URL ?? apiSibling("agents/activate"),

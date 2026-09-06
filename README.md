@@ -110,7 +110,7 @@ ya no forma parte de este proyecto.
 | `AGENT_LOCATION_LABEL`, `AGENT_CITY`, `AGENT_LAT`, `AGENT_LNG` | *(vacío)* | ubicación opcional que se envía en cada heartbeat y aparece en el dashboard |
 | `HEARTBEAT_INTERVAL_MS` | `60000` | frecuencia del heartbeat; el dashboard considera online hasta 2 minutos desde el último |
 | `QUEUE_FILE` | `./data/queue.json` | dónde persiste la cola local |
-| `ENABLE_CAPTURE` | `false` | en `"true"`, empieza a abrir los puertos detectados (y a conectar los periféricos TCP configurados) para leer datos. Mientras esté apagado, el agente solo identifica y reporta |
+| `ENABLE_CAPTURE` | `false` | en `"true"`, empieza a abrir los puertos detectados (y a conectar los periféricos TCP configurados) para leer datos. Mientras esté apagado, el agente solo identifica y reporta. Nota: el default del agente sigue siendo `false`, pero el viewer (`InnoApp Agent` ≥ `0.2.0`) lo lanza con `ENABLE_CAPTURE=true` salvo que la variable esté definida en el entorno del SO |
 | `TCP_PERIPHERALS` | `[]` | JSON con los periféricos TCP a conectar, ej. `[{"id":"datafono-caja1","description":"TPV caja 1","host":"192.168.1.50","port":9000}]` — no hay descubrimiento automático para estos, hay que declarar la IP |
 
 ## Cómo correrlo

@@ -1,6 +1,6 @@
 {
   "name": "print-capture-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Servicio Windows: detecta puertos, captura tickets impresos y sube el crudo a la nube (el parseo vive en el servidor). Reporta su estado al agent-status-viewer.",
   "type": "module",
