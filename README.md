@@ -15,19 +15,23 @@ solo confirma "se capturó un ticket en el puerto X a las Y". Ese detalle
 va a vivir únicamente en el dashboard de la nube, una vez que el servidor
 lo procese.
 
-## Etapa actual: solo detección de puertos, sin lectura todavía
+## Etapa actual: captura prendida en el build del piloto
 
-**El agente identifica todos los puertos de conexión, pero no abre
-ninguno para leer datos.** Es una decisión deliberada: los supuestos de
-captura (marcador de fin de ticket, baud rate, encoding) todavía no están
-validados contra hardware real, y abrir un puerto para leer no es una
-operación sin riesgo — podría interferir con cómo el driver de
-redirección o el propio POS usan ese puerto. Primero se valida que la
-identificación de puertos sea sólida; recién después se prende la
-lectura.
+Hasta la `0.1.x` el agente solo identificaba puertos y no leía nada
+(`ENABLE_CAPTURE=false`), mientras se validaba instalación, activación,
+detección y heartbeat contra PCs reales. Con eso hecho, el viewer
+(`InnoApp Agent` ≥ `0.2.0`) lo lanza con `ENABLE_CAPTURE=true`.
 
-Esto se controla con la variable `ENABLE_CAPTURE` (ver más abajo) —
-por default está apagada.
+El default del **agente** por sí solo sigue siendo `false` (correr
+`npm run start` sin la variable no abre nada); es el viewer el que la
+prende. Se puede forzar a modo solo-diagnóstico con `ENABLE_CAPTURE=false`
+en el entorno del SO.
+
+Los supuestos de captura serie/TCP (marcador de fin de ticket, baud rate,
+encoding) siguen sin validar contra hardware real — ver la tabla de abajo.
+La captura de spool no depende de baud rate ni de un marcador para cerrar
+el ticket (el borde del archivo ya lo es), pero sí del encoding (`latin1`)
+y de que el datatype sea RAW.
 
 Lo que está **probado y funcionando**:
 - **Detección de puertos** (`src/ports/portScanner.ts`) — usa `SerialPort.list()` para la lista real de puertos abribles, y cruza cada uno contra una consulta WMI (`Win32_PnPEntity`, vía PowerShell) para obtener el mismo nombre "amigable" que se ve en el Administrador de dispositivos de Windows (ej. "Standard Serial over Bluetooth link"). Esto importa porque `serialport` por sí solo casi no trae manufacturer/vendorId para puertos virtuales (Bluetooth SPP, redirectores de impresora) — esos campos dependen de que el dispositivo se haya enumerado por USB, cosa que un puerto virtual no hace.
@@ -54,38 +58,66 @@ del alcance de PCI-DSS. Si en algún momento se necesitara integrar con
 el protocolo de pago en sí (no solo capturar su salida), es un proyecto
 distinto con requisitos de compliance propios.
 
-## Captura: puertos serie y periféricos TCP
+## Captura: spooler (general), puertos serie y periféricos TCP
 
-No todo lo que hay que capturar es un puerto COM. Un TPV/datáfono moderno
-muy comúnmente integra por socket TCP o API JSON en vez de un puerto
-serie — así que la captura está armada como una interfaz común
-(`CaptureHandle`, en `src/capture/types.ts`) con dos implementaciones hoy:
+La captura está armada como una interfaz común (`CaptureHandle`, en
+`src/capture/types.ts`) con tres implementaciones:
 
+- **`capture/spoolCapture.ts` — el mecanismo general.** Vigila la carpeta
+  de spool de Windows (`%SystemRoot%\System32\spool\PRINTERS`) y, por cada
+  trabajo de impresión con datatype **RAW**, lee el `.SPL` —los bytes
+  ESC/POS que van a la impresora— y extrae el/los ticket(s). Funciona sin
+  importar cómo esté conectada la impresora (USB, serie, red) mientras use
+  una cola de Windows, que es el caso de la enorme mayoría de las POS. Los
+  `.SPL` gráficos (EMF/XPS — documentos de oficina) se ignoran: necesitan
+  render + OCR, otro problema.
+  - Activa "conservar documentos impresos" en las impresoras vigiladas
+    (`SetPrinter`) para no perder la carrera contra el borrado del `.SPL`,
+    y borra cada trabajo (`Remove-PrintJob`) después de procesarlo.
+  - **Requiere leer `spool\PRINTERS`**, que por ACL default un usuario
+    común no puede — el agente tiene que correr elevado o como servicio
+    Windows bajo LocalSystem. Si no tiene permiso, lo loguea y sigue con
+    los otros mecanismos.
+  - Cada ticket queda asociado al **nombre de la impresora** (ocupa el
+    lugar del "puerto" — `portParsers` se puede indexar por ahí).
 - **`capture/portCapture.ts`** — puertos serie (COM), descubiertos
-  dinámicamente por `ports/portScanner.ts` en cada escaneo.
+  dinámicamente por `ports/portScanner.ts`. **Fallback** para las POS que
+  mandan ESC/POS crudo directo a un COM salteando el spooler.
 - **`capture/tcpCapture.ts`** — periféricos TCP, que **no se descubren
-  solos** (no hay "escaneo de red") — se configuran a mano por
-  `TCP_PERIPHERALS` (ver más abajo). El agente se conecta como cliente y
-  reintenta indefinidamente si se cae la conexión.
+  solos** — se configuran a mano por `TCP_PERIPHERALS`. El agente se
+  conecta como cliente y reintenta indefinidamente.
 
-Agregar un mecanismo nuevo (ej. HID por USB) es cuestión de escribir una
-tercera implementación de `CaptureHandle` — el resto del pipeline
-(cola, subida a la nube, reporte al viewer) no cambia.
+Agregar un mecanismo nuevo (ej. HID por USB) es cuestión de escribir otra
+implementación de `CaptureHandle` — el resto del pipeline (cola, subida a
+la nube, reporte al viewer) no cambia.
 
-Probado de punta a punta con un TPV simulado por TCP en este entorno: el
-agente se conectó, recibió mensajes JSON delimitados por salto de línea,
-y los encoló igual que un ticket de impresora.
+La lógica pura de la captura de spool (RAW vs gráfico, cómo partir un
+`.SPL` en tickets) vive en `capture/spoolFile.ts`, separada del IO, con
+tests en `capture/spoolFile.test.ts`.
+
+### Validar en una PC real
+
+```powershell
+# consola "como administrador"
+npm run inspect-spool -- --printer "EPSON TM-T20II Receipt" --seconds 120
+```
+Vigila el spool sin tocar la cola/subida/pipe, imprimís un ticket real, y
+guarda en `data/captures/` el `.SPL` crudo + un `.txt` con hex dump, la
+clasificación (RAW/EMF) y los tickets que saldrían. Restaura "conservar
+impresos" al salir.
 
 ## Estructura
 
 ```
 src/
-├── index.ts                     # arma todo: puertos + TCP → captura → cola cruda → nube → pipe
+├── index.ts                     # arma todo: spool + puertos + TCP → captura → cola cruda → nube → pipe
 ├── config.ts
 ├── ports/portScanner.ts          # SerialPort.list() + nombres WMI
 ├── capture/
 │   ├── types.ts                  # CaptureHandle — contrato común
-│   ├── portCapture.ts             # puertos serie (COM)
+│   ├── spoolCapture.ts            # spooler de Windows (mecanismo general) — watcher + WMI
+│   ├── spoolFile.ts               # lógica pura: RAW vs gráfico, partir un .SPL en tickets
+│   ├── portCapture.ts             # puertos serie (COM) — fallback
 │   └── tcpCapture.ts               # periféricos TCP (TPVs/datáfonos modernos)
 ├── queue/localQueue.ts            # cola persistida en JSON, guarda el texto crudo
 └── cloud/uploadClient.ts          # POST del crudo a CLOUD_UPLOAD_URL
@@ -112,6 +144,10 @@ ya no forma parte de este proyecto.
 | `QUEUE_FILE` | `./data/queue.json` | dónde persiste la cola local |
 | `ENABLE_CAPTURE` | `false` | en `"true"`, empieza a abrir los puertos detectados (y a conectar los periféricos TCP configurados) para leer datos. Mientras esté apagado, el agente solo identifica y reporta. Nota: el default del agente sigue siendo `false`, pero el viewer (`InnoApp Agent` ≥ `0.2.0`) lo lanza con `ENABLE_CAPTURE=true` salvo que la variable esté definida en el entorno del SO |
 | `TCP_PERIPHERALS` | `[]` | JSON con los periféricos TCP a conectar, ej. `[{"id":"datafono-caja1","description":"TPV caja 1","host":"192.168.1.50","port":9000}]` — no hay descubrimiento automático para estos, hay que declarar la IP |
+| `ENABLE_SPOOL_CAPTURE` | `true` | en `"false"`, no vigila el spooler (solo captura serie/TCP). Solo corre si además `ENABLE_CAPTURE` está en `"true"` y el SO es Windows |
+| `SPOOL_DIR` | `%SystemRoot%\System32\spool\PRINTERS` | carpeta de spool a vigilar (raro cambiarlo; útil para tests) |
+| `SPOOL_KEEP_PRINTED_JOBS` | `true` | activa "conservar documentos impresos" en las impresoras vigiladas para no perder el `.SPL`; en `"false"` el agente no toca la config de las impresoras |
+| `SPOOL_PRINTERS` | `[]` | JSON con los nombres exactos de impresoras a vigilar, ej. `["EPSON TM-T20II Receipt"]` — vacío = todas las locales no virtuales |
 
 ## Cómo correrlo
 

@@ -42,6 +42,18 @@ function optionalNumber(name: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
+/** Lista de strings desde una env var JSON (ej. SPOOL_PRINTERS='["EPSON TM-T20II Receipt"]'). */
+function parseStringArray(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch (err) {
+    console.error("[config] no se pudo parsear como lista JSON, se ignora:", raw, err);
+    return [];
+  }
+}
+
 export const config = {
   agentName: "print-capture-agent",
   agentVersion: "0.2.0",
@@ -98,4 +110,23 @@ export const config = {
    */
   captureEnabled: process.env.ENABLE_CAPTURE === "true",
   tcpPeripherals: parseTcpPeripherals(),
+  /**
+   * Captura a través del spooler de Windows — el mecanismo general: vigila
+   * `spool\PRINTERS` y lee el `.SPL` de cada trabajo RAW, sin importar cómo
+   * esté conectada la impresora (USB, serie, red). Gateado además por
+   * `captureEnabled`. Se apaga con `ENABLE_SPOOL_CAPTURE=false` en un equipo
+   * donde solo se quiera la captura serie/TCP.
+   */
+  spoolCaptureEnabled: process.env.ENABLE_SPOOL_CAPTURE !== "false",
+  spoolDir:
+    process.env.SPOOL_DIR ?? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\spool\\PRINTERS`,
+  /**
+   * Activa "conservar documentos impresos" en las impresoras vigiladas para
+   * que el `.SPL` no se borre antes de leerlo. Default `true`; ponerlo en
+   * `false` solo si no se quiere que el agente toque la config de las
+   * impresoras (a costa de perder tickets de impresoras rápidas).
+   */
+  spoolKeepPrintedJobs: process.env.SPOOL_KEEP_PRINTED_JOBS !== "false",
+  /** Whitelist opcional de impresoras a vigilar; vacío = todas las locales no virtuales. */
+  spoolPrinters: parseStringArray(process.env.SPOOL_PRINTERS),
 };

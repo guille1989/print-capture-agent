@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { AgentPipeServer, PortInfo } from "print-capture-agent-pipe-server";
 
 import { capturePort } from "./capture/portCapture.js";
+import { startSpoolCapture } from "./capture/spoolCapture.js";
 import { captureTcp } from "./capture/tcpCapture.js";
 import { CaptureHandle } from "./capture/types.js";
 import { classifyFailure, computeBackoffMs } from "./cloud/backoff.js";
@@ -49,6 +50,16 @@ const tcpPorts: PortInfo[] = config.tcpPeripherals.map((peripheral) => ({
   status: "idle",
   lastActivityAt: new Date().toISOString(),
 }));
+
+/**
+ * Impresoras vigiladas por la captura de spool — se resuelven una vez al
+ * arrancar (no cambian seguido) y se reportan como "puertos" junto con los
+ * serie y los TCP. El `ticket_event` del pipe las pone en "active" sola.
+ */
+let spoolPorts: PortInfo[] = [];
+
+/** Clave con la que vive el handle de la captura de spool en `captures` (no es un puerto real). */
+const SPOOL_CAPTURE_ID = "__spool__";
 
 async function handleTicketText(rawPort: string, rawText: string): Promise<void> {
   const id = randomUUID();
@@ -196,7 +207,7 @@ async function refreshPorts(): Promise<void> {
     status: captures.has(port.id) ? ("active" as const) : ("idle" as const),
   }));
 
-  pipe.setPorts([...serialPorts, ...reportedTcpPorts]);
+  pipe.setPorts([...serialPorts, ...reportedTcpPorts, ...spoolPorts]);
 
   // Arranca a escuchar los puertos serie nuevos que no estuviéramos ya
   // capturando. Gateado por ENABLE_CAPTURE: hasta no validar los supuestos
@@ -212,9 +223,10 @@ async function refreshPorts(): Promise<void> {
     }
   }
 
-  // Deja de escuchar los puertos serie que desaparecieron — los TCP no
-  // entran acá porque son estáticos, no se "detectan" en cada vuelta.
+  // Deja de escuchar los puertos serie que desaparecieron — los TCP y la
+  // captura de spool no entran acá porque no se "detectan" en cada vuelta.
   for (const [portId, handle] of captures) {
+    if (portId === SPOOL_CAPTURE_ID) continue;
     const stillSerial = detected.some((p) => p.id === portId);
     const isTcp = tcpPorts.some((p) => p.id === portId);
     if (!stillSerial && !isTcp) {
@@ -232,6 +244,27 @@ function startTcpCaptures(): void {
     });
     captures.set(peripheral.id, handle);
   }
+}
+
+/**
+ * Arranca la captura de spool (el mecanismo general). Es async porque
+ * consulta el spooler por WMI al inicializar, así que se espera antes del
+ * primer `refreshPorts()` para que las impresoras ya salgan en el snapshot
+ * inicial de puertos.
+ */
+async function initSpoolCapture(): Promise<void> {
+  if (!config.captureEnabled || !config.spoolCaptureEnabled) return;
+  const { handle, printers } = await startSpoolCapture((printerName, rawText) => {
+    runDetached("handleTicketText", () => handleTicketText(printerName, rawText));
+  });
+  captures.set(SPOOL_CAPTURE_ID, handle);
+  spoolPorts = printers.map((name) => ({
+    id: name,
+    name,
+    description: "Impresora (captura de spool)",
+    status: "idle",
+    lastActivityAt: new Date().toISOString(),
+  }));
 }
 
 /**
@@ -286,6 +319,13 @@ async function main(): Promise<void> {
   await queue.load();
   pipe.start();
   startTcpCaptures();
+
+  try {
+    await initSpoolCapture();
+  } catch (err) {
+    console.error("[agent] error inesperado arrancando la captura de spool:", err);
+    pipe.setStatus("error", "Error interno arrancando la captura de spool — ver logs del agente");
+  }
 
   try {
     await refreshPorts();

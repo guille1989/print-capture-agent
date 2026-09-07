@@ -10,7 +10,8 @@
     "start": "tsx --env-file=.env src/index.ts",
     "test": "tsx --test",
     "capture-raw-port": "tsx scripts/capture-raw-port.ts",
-    "capture-raw-tcp": "tsx scripts/capture-raw-tcp.ts"
+    "capture-raw-tcp": "tsx scripts/capture-raw-tcp.ts",
+    "inspect-spool": "tsx scripts/inspect-spool.ts"
   },
   "dependencies": {
     "print-capture-agent-pipe-server": "file:../print-capture-agent-pipe-server",
