@@ -6,7 +6,8 @@
  * necesitar el spooler de Windows ni una impresora real.
  */
 
-const CUT_PAPER_MARKER = "\x1dV"; // GS V — igual que `portCapture.ts`
+/** `GS V` — comando ESC/POS de corte de papel, marca el fin de un ticket. */
+const GS_V = Buffer.from([0x1d, 0x56]);
 
 /**
  * Datatypes de spool cuyo `.SPL` son los bytes crudos que van a la
@@ -68,29 +69,49 @@ export function classifySpool(args: { datatype?: string | null; head: Buffer }):
 }
 
 /**
- * Parte el contenido de un `.SPL` en tickets. A diferencia de la captura
- * serie/TCP (stream continuo sin borde natural), un `.SPL` es un trabajo de
- * impresión completo: el borde del archivo ya es un fin de ticket. Además
- * se corta en cada comando de corte de papel (GS V), por si un mismo
- * trabajo trae varias copias (ej. comanda de cocina + ticket de cliente).
+ * Cantidad mínima de bytes "con contenido" (imprimibles o de la mitad alta,
+ * ni control ni DEL) para que un segmento cuente como ticket. El pedazo que
+ * queda después del último corte suele ser solo comandos de avance de papel
+ * (`ESC d n`, `ESC J n`…) — pocos bytes. Un ticket real, sea texto o imagen
+ * raster, siempre es mucho más grande.
  */
-export function splitSpoolIntoTickets(content: string): string[] {
-  const tickets: string[] = [];
-  let rest = content;
+const MIN_MEANINGFUL_BYTES = 16;
 
-  let cutIndex = rest.indexOf(CUT_PAPER_MARKER);
-  while (cutIndex !== -1) {
-    const end = cutIndex + CUT_PAPER_MARKER.length;
-    tickets.push(rest.slice(0, end));
-    rest = rest.slice(end);
-    cutIndex = rest.indexOf(CUT_PAPER_MARKER);
+function meaningfulByteCount(seg: Buffer): number {
+  let count = 0;
+  for (const b of seg) if (b >= 0x20 && b !== 0x7f) count++;
+  return count;
+}
+
+/**
+ * Parte el `.SPL` (bytes ESC/POS crudos) en tickets. A diferencia de la
+ * captura serie/TCP (stream continuo sin borde natural), un `.SPL` es un
+ * trabajo de impresión completo: el borde del archivo ya es un fin de
+ * ticket. Además se corta en cada comando de corte de papel (`GS V`), por
+ * si un mismo trabajo trae varias copias (ej. comanda de cocina + ticket de
+ * cliente).
+ *
+ * Trabaja sobre bytes, no sobre string: el `.SPL` puede ser ESC/POS de texto
+ * o una imagen raster (`GS 8 L` / `GS v 0`), y en el segundo caso decodificar
+ * a string perdería o alteraría bytes. El agente sube estos segmentos tal
+ * cual (base64) y la nube decide si son texto u OCR.
+ */
+export function splitEscpos(content: Buffer): Buffer[] {
+  const segments: Buffer[] = [];
+  let start = 0;
+
+  let cut = content.indexOf(GS_V, start);
+  while (cut !== -1) {
+    // `GS V m` (3 bytes) o `GS V m n` (4 bytes, corte con avance) — se
+    // incluye el comando completo en el segmento que cierra.
+    const mode = content[cut + 2];
+    const cutLength = mode === 0x41 || mode === 0x42 ? 4 : 3;
+    const end = Math.min(cut + cutLength, content.length);
+    segments.push(content.subarray(start, end));
+    start = end;
+    cut = content.indexOf(GS_V, start);
   }
-  if (rest.length > 0) tickets.push(rest);
+  if (start < content.length) segments.push(content.subarray(start));
 
-  // Descarta segmentos sin texto real: el pedazo que queda después del
-  // último corte suele ser solo comandos ESC/POS de avance de papel
-  // (`ESC d n`, `ESC J n`…), que traen bytes imprimibles sueltos pero
-  // ninguna palabra. Un ticket de verdad tiene decenas de letras/números.
-  const MIN_ALPHANUMERIC = 3;
-  return tickets.filter((ticket) => (ticket.match(/[\p{L}\p{N}]/gu) ?? []).length >= MIN_ALPHANUMERIC);
+  return segments.filter((seg) => meaningfulByteCount(seg) >= MIN_MEANINGFUL_BYTES);
 }

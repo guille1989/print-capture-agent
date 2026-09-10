@@ -30,8 +30,11 @@ en el entorno del SO.
 Los supuestos de captura serie/TCP (marcador de fin de ticket, baud rate,
 encoding) siguen sin validar contra hardware real — ver la tabla de abajo.
 La captura de spool no depende de baud rate ni de un marcador para cerrar
-el ticket (el borde del archivo ya lo es), pero sí del encoding (`latin1`)
-y de que el datatype sea RAW.
+el ticket (el borde del archivo ya lo es) y **no interpreta el contenido**:
+sube los bytes ESC/POS crudos en base64 (`rawBase64` + `rawEncoding:
+"escpos"`), y la nube decide si son texto o una imagen raster a la que hay
+que hacerle OCR. Validado 2026-09-09 contra un ticket real de Loggro: el
+POS imprime la factura entera como bitmap.
 
 Lo que está **probado y funcionando**:
 - **Detección de puertos** (`src/ports/portScanner.ts`) — usa `SerialPort.list()` para la lista real de puertos abribles, y cruza cada uno contra una consulta WMI (`Win32_PnPEntity`, vía PowerShell) para obtener el mismo nombre "amigable" que se ve en el Administrador de dispositivos de Windows (ej. "Standard Serial over Bluetooth link"). Esto importa porque `serialport` por sí solo casi no trae manufacturer/vendorId para puertos virtuales (Bluetooth SPP, redirectores de impresora) — esos campos dependen de que el dispositivo se haya enumerado por USB, cosa que un puerto virtual no hace.
@@ -66,11 +69,14 @@ La captura está armada como una interfaz común (`CaptureHandle`, en
 - **`capture/spoolCapture.ts` — el mecanismo general.** Vigila la carpeta
   de spool de Windows (`%SystemRoot%\System32\spool\PRINTERS`) y, por cada
   trabajo de impresión con datatype **RAW**, lee el `.SPL` —los bytes
-  ESC/POS que van a la impresora— y extrae el/los ticket(s). Funciona sin
-  importar cómo esté conectada la impresora (USB, serie, red) mientras use
-  una cola de Windows, que es el caso de la enorme mayoría de las POS. Los
-  `.SPL` gráficos (EMF/XPS — documentos de oficina) se ignoran: necesitan
-  render + OCR, otro problema.
+  ESC/POS que van a la impresora—, lo parte por `GS V` (corte de papel) y
+  sube cada ticket **en base64, sin interpretarlo** (`rawEncoding: "escpos"`).
+  Funciona sin importar cómo esté conectada la impresora (USB, serie, red)
+  mientras use una cola de Windows, que es el caso de la enorme mayoría de
+  las POS. Los `.SPL` gráficos **EMF/XPS** (documentos de oficina) se
+  ignoran acá. Un `.SPL` RAW que en realidad es una **imagen raster**
+  (varios POS, Loggro entre ellos, imprimen la factura entera como bitmap)
+  sí se sube — la nube extrae el raster y le hace OCR.
   - Activa "conservar documentos impresos" en las impresoras vigiladas
     (`SetPrinter`) para no perder la carrera contra el borrado del `.SPL`,
     y borra cada trabajo (`Remove-PrintJob`) después de procesarlo.
@@ -98,13 +104,22 @@ tests en `capture/spoolFile.test.ts`.
 ### Validar en una PC real
 
 ```powershell
-# consola "como administrador"
+# consola "como administrador", en un checkout de dev con node instalado
 npm run inspect-spool -- --printer "EPSON TM-T20II Receipt" --seconds 120
 ```
 Vigila el spool sin tocar la cola/subida/pipe, imprimís un ticket real, y
 guarda en `data/captures/` el `.SPL` crudo + un `.txt` con hex dump, la
 clasificación (RAW/EMF) y los tickets que saldrían. Restaura "conservar
 impresos" al salir.
+
+**En una PC del negocio sin entorno de dev** (sin Node, sin el repo):
+`scripts/inspect-spool.cjs` es la misma herramienta en un solo archivo
+autocontenido, para correr con el `node.exe` que ya trae el instalador:
+```powershell
+& "C:\Users\<usuario>\AppData\Local\InnoApp Agent\resources\agent\node.exe" `
+  "$env:USERPROFILE\Desktop\inspect-spool.cjs" --printer "EPSON TM-T20II Receipt" --seconds 120
+```
+Deja la salida en una carpeta `inspect-spool-<fecha>` en el Escritorio.
 
 ## Estructura
 
@@ -116,7 +131,7 @@ src/
 ├── capture/
 │   ├── types.ts                  # CaptureHandle — contrato común
 │   ├── spoolCapture.ts            # spooler de Windows (mecanismo general) — watcher + WMI
-│   ├── spoolFile.ts               # lógica pura: RAW vs gráfico, partir un .SPL en tickets
+│   ├── spoolFile.ts               # lógica pura: RAW vs gráfico, partir el .SPL (bytes) por GS V
 │   ├── portCapture.ts             # puertos serie (COM) — fallback
 │   └── tcpCapture.ts               # periféricos TCP (TPVs/datáfonos modernos)
 ├── queue/localQueue.ts            # cola persistida en JSON, guarda el texto crudo
@@ -148,6 +163,7 @@ ya no forma parte de este proyecto.
 | `SPOOL_DIR` | `%SystemRoot%\System32\spool\PRINTERS` | carpeta de spool a vigilar (raro cambiarlo; útil para tests) |
 | `SPOOL_KEEP_PRINTED_JOBS` | `true` | activa "conservar documentos impresos" en las impresoras vigiladas para no perder el `.SPL`; en `"false"` el agente no toca la config de las impresoras |
 | `SPOOL_PRINTERS` | `[]` | JSON con los nombres exactos de impresoras a vigilar, ej. `["EPSON TM-T20II Receipt"]` — vacío = todas las locales no virtuales |
+| `SPOOL_MAX_JOB_BYTES` | `6291456` (6 MB) | los `.SPL` más grandes que esto se ignoran (no son un ticket); alineado con el límite del `ingest` |
 
 ## Cómo correrlo
 

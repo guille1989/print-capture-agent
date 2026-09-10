@@ -27,7 +27,13 @@ interface RawTicket {
   ticketId: string;
   port: string;
   capturedAt: string;
-  rawText: string;
+  // Captura serie/TCP: texto crudo. Captura de spool: `rawBase64` con los
+  // bytes ESC/POS (que pueden ser una imagen raster) y `rawEncoding`. Va
+  // siempre exactamente uno de los dos — sin `rawEncoding` la nube asume
+  // texto (compatibilidad con agentes anteriores).
+  rawText?: string;
+  rawBase64?: string;
+  rawEncoding?: "escpos";
 }
 
 const pipe = new AgentPipeServer({
@@ -61,7 +67,11 @@ let spoolPorts: PortInfo[] = [];
 /** Clave con la que vive el handle de la captura de spool en `captures` (no es un puerto real). */
 const SPOOL_CAPTURE_ID = "__spool__";
 
-async function handleTicketText(rawPort: string, rawText: string): Promise<void> {
+async function handleCapturedTicket(
+  rawPort: string,
+  raw: string,
+  encoding: "text" | "escpos" = "text",
+): Promise<void> {
   const id = randomUUID();
   const capturedAt = new Date().toISOString();
 
@@ -70,8 +80,13 @@ async function handleTicketText(rawPort: string, rawText: string): Promise<void>
   // que el servidor lo parsee.
   pipe.emitTicket({ id, timestamp: capturedAt, port: rawPort });
 
-  await queue.enqueue(id, { ticketId: id, port: rawPort, capturedAt, rawText });
-  console.log(`[agent] ticket capturado en ${rawPort}, encolado para parsear en la nube`);
+  const payload: RawTicket =
+    encoding === "escpos"
+      ? { ticketId: id, port: rawPort, capturedAt, rawBase64: raw, rawEncoding: "escpos" }
+      : { ticketId: id, port: rawPort, capturedAt, rawText: raw };
+
+  await queue.enqueue(id, payload);
+  console.log(`[agent] ticket capturado en ${rawPort} (${encoding}), encolado para parsear en la nube`);
 }
 
 /**
@@ -217,7 +232,7 @@ async function refreshPorts(): Promise<void> {
     for (const port of detected) {
       if (captures.has(port.id)) continue;
       const handle = capturePort(port.id, (rawText) => {
-        runDetached("handleTicketText", () => handleTicketText(port.id, rawText));
+        runDetached("handleCapturedTicket", () => handleCapturedTicket(port.id, rawText));
       });
       captures.set(port.id, handle);
     }
@@ -240,7 +255,7 @@ function startTcpCaptures(): void {
   if (!config.captureEnabled) return;
   for (const peripheral of config.tcpPeripherals) {
     const handle = captureTcp(peripheral, (rawText) => {
-      runDetached("handleTicketText", () => handleTicketText(peripheral.id, rawText));
+      runDetached("handleCapturedTicket", () => handleCapturedTicket(peripheral.id, rawText));
     });
     captures.set(peripheral.id, handle);
   }
@@ -254,8 +269,8 @@ function startTcpCaptures(): void {
  */
 async function initSpoolCapture(): Promise<void> {
   if (!config.captureEnabled || !config.spoolCaptureEnabled) return;
-  const { handle, printers } = await startSpoolCapture((printerName, rawText) => {
-    runDetached("handleTicketText", () => handleTicketText(printerName, rawText));
+  const { handle, printers } = await startSpoolCapture((printerName, rawBase64) => {
+    runDetached("handleCapturedTicket", () => handleCapturedTicket(printerName, rawBase64, "escpos"));
   });
   captures.set(SPOOL_CAPTURE_ID, handle);
   spoolPorts = printers.map((name) => ({

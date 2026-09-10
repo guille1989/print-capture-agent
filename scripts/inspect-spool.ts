@@ -23,7 +23,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { classifySpool, splitSpoolIntoTickets } from "../src/capture/spoolFile.js";
+import { classifySpool, splitEscpos } from "../src/capture/spoolFile.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -132,7 +132,7 @@ async function main(): Promise<void> {
 
     const meta = await jobMeta(jobId);
     const decision = classifySpool({ datatype: meta.datatype, head: content.subarray(0, 4096) });
-    const tickets = decision.kind === "raw" ? splitSpoolIntoTickets(content.toString("latin1")) : [];
+    const tickets = decision.kind === "raw" ? splitEscpos(content) : [];
 
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const base = `spool-${stamp}-job${jobId}`;
@@ -151,7 +151,11 @@ async function main(): Promise<void> {
         "=== hex dump (primeros 2 KB) ===",
         hexDump(content),
         "",
-        ...tickets.flatMap((t, i) => [`=== ticket ${i + 1} (latin1) ===`, JSON.stringify(t), ""]),
+        ...tickets.flatMap((t, i) => [
+          `=== ticket ${i + 1} (${t.length} bytes, vista latin1) ===`,
+          JSON.stringify(t.toString("latin1")),
+          "",
+        ]),
       ].join("\n"),
     );
 

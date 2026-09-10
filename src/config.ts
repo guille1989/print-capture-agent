@@ -129,4 +129,10 @@ export const config = {
   spoolKeepPrintedJobs: process.env.SPOOL_KEEP_PRINTED_JOBS !== "false",
   /** Whitelist opcional de impresoras a vigilar; vacío = todas las locales no virtuales. */
   spoolPrinters: parseStringArray(process.env.SPOOL_PRINTERS),
+  /**
+   * Máximo tamaño de un `.SPL` a capturar. Un ticket con logo raster ronda
+   * los 200 KB; por encima de esto es una impresión que no es un ticket. Va
+   * alineado con el límite de `ingest` en la nube.
+   */
+  spoolMaxJobBytes: optionalNumber("SPOOL_MAX_JOB_BYTES") ?? 6 * 1024 * 1024,
 };

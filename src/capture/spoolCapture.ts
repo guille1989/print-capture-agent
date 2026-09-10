@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { config } from "../config.js";
-import { classifySpool, splitSpoolIntoTickets } from "./spoolFile.js";
+import { classifySpool, splitEscpos } from "./spoolFile.js";
 import type { CaptureHandle } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -151,7 +151,13 @@ async function removeJob(printer: string, jobId: number): Promise<void> {
  * servicio bajo LocalSystem (ver PROYECTO.md sección 8).
  */
 export async function startSpoolCapture(
-  onTicketText: (printerName: string, rawText: string) => void,
+  /**
+   * `rawBase64` son los bytes ESC/POS crudos de un ticket, en base64. Se
+   * suben sin interpretar — la nube decide si son texto o una imagen raster
+   * a la que hay que hacerle OCR (Loggro y varios POS imprimen el ticket
+   * entero como bitmap).
+   */
+  onTicket: (printerName: string, rawBase64: string) => void,
 ): Promise<SpoolCaptureResult> {
   const noop: SpoolCaptureResult = { handle: { close() {} }, printers: [] };
 
@@ -201,8 +207,19 @@ export async function startSpoolCapture(
       return;
     }
 
-    const tickets = splitSpoolIntoTickets(content.toString("latin1"));
-    for (const ticket of tickets) onTicketText(printer, ticket);
+    // Cota de tamaño: un ticket con logo pesa ~200 KB; algo mucho más grande
+    // es una impresión que no es un ticket (una foto, un PDF de varias
+    // páginas). Subirlo igual chocaría contra el límite del `ingest`.
+    if (content.length > config.spoolMaxJobBytes) {
+      console.warn(
+        `[spool] trabajo ${jobId} (${printer}) ignorado: ${content.length} bytes supera el máximo (${config.spoolMaxJobBytes})`,
+      );
+      await removeJob(printer, jobId);
+      return;
+    }
+
+    const tickets = splitEscpos(content);
+    for (const ticket of tickets) onTicket(printer, ticket.toString("base64"));
     console.log(
       tickets.length > 0
         ? `[spool] trabajo ${jobId} (${printer}): ${tickets.length} ticket(s) capturado(s), ${content.length} bytes`
