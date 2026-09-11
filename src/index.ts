@@ -1,3 +1,10 @@
+import { installTimestampedLogging } from "./log.js";
+
+// Antes que cualquier otro import — ver el comentario en log.ts. Así queda
+// aplicado incluso para lo que logueen los módulos importados más abajo
+// (ej. print-capture-agent-pipe-server) apenas arranquen a correr.
+installTimestampedLogging();
+
 import { randomUUID } from "node:crypto";
 
 import { AgentPipeServer, PortInfo } from "print-capture-agent-pipe-server";
@@ -134,6 +141,9 @@ async function syncQueueToCloud(): Promise<void> {
 
     if (result.ok) {
       await queue.markSent(record.id);
+      // Antes solo se logueaban los fallos — sin esto, no había forma de
+      // saber desde el log si un ticket llegó a intentar subir siquiera.
+      console.log(`[agent] ticket ${record.id} subido correctamente`);
     } else {
       anyFailure = true;
       const kind = classifyFailure(result.status);
@@ -341,6 +351,11 @@ async function main(): Promise<void> {
     timeoutMs: config.cloudUploadTimeoutMs,
   });
   await queue.load();
+  // Visibilidad al arrancar: si venía algo pendiente de una corrida
+  // anterior (ej. no se llegó a subir antes de que el servicio matara el
+  // proceso), que quede a la vista desde el arranque, no recién cuando
+  // falla el próximo intento.
+  console.log(`[agent] cola cargada: ${queue.getPending().length} ticket(s) pendiente(s)`);
   pipe.start();
   startTcpCaptures();
 
