@@ -1,3 +1,5 @@
+import { dirname, join } from "node:path";
+
 import type { TcpPeripheral } from "./capture/tcpCapture.js";
 
 /**
@@ -42,6 +44,10 @@ function optionalNumber(name: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
+function queueFilePath(): string {
+  return process.env.QUEUE_FILE ?? "./data/queue.json";
+}
+
 /** Lista de strings desde una env var JSON (ej. SPOOL_PRINTERS='["EPSON TM-T20II Receipt"]'). */
 function parseStringArray(raw: string | undefined): string[] {
   if (!raw) return [];
@@ -75,7 +81,14 @@ export const config = {
     };
     return Object.values(value).some((item) => item !== undefined) ? value : undefined;
   })(),
-  queueFilePath: process.env.QUEUE_FILE ?? "./data/queue.json",
+  queueFilePath: queueFilePath(),
+  /**
+   * El pipe-server escribe acá un snapshot del estado (además del pipe). La
+   * app de bandeja lo lee — necesario cuando el agente corre como servicio
+   * LocalSystem y no puede compartir el pipe con un proceso de usuario.
+   * Por default, junto a la cola.
+   */
+  statusFilePath: process.env.STATUS_FILE ?? join(dirname(queueFilePath()), "status.json"),
   idleThresholdMs: 5 * 60 * 1000,
   portScanIntervalMs: 10 * 1000,
   cloudSyncIntervalMs: 15 * 1000,

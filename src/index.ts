@@ -40,6 +40,7 @@ const pipe = new AgentPipeServer({
   agentName: config.agentName,
   agentVersion: config.agentVersion,
   idleThresholdMs: config.idleThresholdMs,
+  statusFilePath: config.statusFilePath,
 });
 
 const queue = new LocalQueue<RawTicket>(config.queueFilePath);
@@ -141,7 +142,12 @@ async function syncQueueToCloud(): Promise<void> {
       const nextRetryAt = new Date(Date.now() + delayMs).toISOString();
       await queue.markFailed(record.id, nextRetryAt);
 
-      const kindLabel = kind === "permanent" ? "permanente, no va a cambiar solo" : "transitorio";
+      const kindLabel =
+        kind === "permanent"
+          ? "permanente, no va a cambiar solo"
+          : kind === "delayed"
+            ? "403 — API key propagando o mal configurada, se reintenta lento"
+            : "transitorio";
       console.error(
         `[agent] falló la subida de ${record.id} (${kindLabel}): ` +
           `${result.error ?? `HTTP ${result.status}`} — reintenta en ${Math.round(delayMs / 1000)}s`,
@@ -169,7 +175,10 @@ function scheduleHeartbeatLoop(): void {
 }
 
 async function sendInitialHeartbeatWithRetry(): Promise<void> {
-  const retryDelaysMs = [0, 2_000, 5_000, 10_000];
+  // Ventanas más largas que las de un error de red: un agente recién
+  // activado choca con un 403 hasta que propaga su API key (minutos). Si
+  // igual no entra acá, el loop periódico (cada 60s) lo sigue intentando.
+  const retryDelaysMs = [0, 5_000, 15_000, 30_000, 60_000];
   let lastError: unknown;
   for (const delayMs of retryDelaysMs) {
     if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
