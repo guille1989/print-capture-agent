@@ -23,6 +23,17 @@ const SETTLE_MS = 1000;
 const POWERSHELL_TIMEOUT_MS = 10_000;
 /** Cuántos bytes del arranque alcanzan para detectar un `.SPL` gráfico. */
 const HEAD_BYTES = 4096;
+/**
+ * Cada cuánto se vuelve a preguntar por WMI qué impresoras hay, mientras el
+ * agente auto-detecta (no aplica si `SPOOL_PRINTERS` fija la lista a mano).
+ * Sin este reintento periódico, una impresora que todavía no esté lista
+ * para Windows justo cuando arranca el agente (ej. PC recién prendido, la
+ * térmica tarda un poco más en enumerar por USB) lo deja ciego para
+ * siempre — pasó en la práctica en el piloto de Empanadas Típicas: el
+ * agente arrancó con 0 impresoras detectadas y se quedó así ~7 horas hasta
+ * que alguien reinició el servicio a mano.
+ */
+const PRINTER_RESCAN_MS = 60_000;
 
 interface JobMeta {
   printer: string;
@@ -158,6 +169,12 @@ export async function startSpoolCapture(
    * entero como bitmap).
    */
   onTicket: (printerName: string, rawBase64: string) => void,
+  /**
+   * Se llama cada vez que cambia la lista de impresoras detectadas (al
+   * arrancar, y después en cada `PRINTER_RESCAN_MS` si cambió algo) — así
+   * quien reporta el estado al viewer no se queda con la foto del arranque.
+   */
+  onPrintersChanged: (printers: string[]) => void = () => {},
 ): Promise<SpoolCaptureResult> {
   const noop: SpoolCaptureResult = { handle: { close() {} }, printers: [] };
 
@@ -166,17 +183,68 @@ export async function startSpoolCapture(
     return noop;
   }
 
-  const printers = config.spoolPrinters.length > 0 ? config.spoolPrinters : await listLocalPrinters();
-  if (printers.length === 0) {
-    console.warn("[spool] no hay impresoras locales para vigilar — captura de spool inactiva");
-    return noop;
+  const manualPrinters = config.spoolPrinters;
+  let printers: string[] = manualPrinters;
+  let closed = false;
+
+  /**
+   * Detecta impresoras por WMI y activa "conservar impresos" en las que
+   * sean nuevas. Se llama una vez antes de arrancar y después
+   * periódicamente — nunca se da por vencida ni deja de intentarlo, y
+   * siempre deja algo en el log (antes, 0 impresoras detectadas al
+   * arrancar significaba quedar ciego en silencio, sin ningún error).
+   */
+  async function rescanPrinters(): Promise<void> {
+    if (manualPrinters.length > 0) return; // lista fija a mano, no autodetectar
+
+    const found = await listLocalPrinters();
+    const isNew = found.filter((name) => !printers.includes(name));
+
+    if (found.length === 0) {
+      console.warn("[spool] no se detecta ninguna impresora local — reintentando en 60s");
+      if (printers.length > 0) {
+        printers = [];
+        onPrintersChanged(printers);
+      }
+      return;
+    }
+
+    if (isNew.length > 0) {
+      if (config.spoolKeepPrintedJobs) await enableKeepPrintedJobs(isNew);
+      console.log(`[spool] impresora(s) detectada(s): ${isNew.join(", ")}`);
+    }
+    if (found.length !== printers.length || isNew.length > 0) {
+      printers = found;
+      onPrintersChanged(printers);
+    }
   }
 
-  if (config.spoolKeepPrintedJobs) await enableKeepPrintedJobs(printers);
+  function schedulePrinterRescan(): void {
+    setTimeout(() => {
+      if (closed) return;
+      rescanPrinters()
+        .catch((err) => console.error("[spool] error redetectando impresoras:", err instanceof Error ? err.message : err))
+        .finally(schedulePrinterRescan);
+    }, PRINTER_RESCAN_MS);
+  }
+
+  if (manualPrinters.length > 0 && config.spoolKeepPrintedJobs) {
+    await enableKeepPrintedJobs(manualPrinters);
+  } else {
+    await rescanPrinters();
+  }
+  schedulePrinterRescan();
+
+  // A diferencia de antes, no nos quedamos sin arrancar el watcher solo
+  // porque todavía no se detectó ninguna impresora — la carpeta de spool se
+  // vigila entera (no por impresora puntual), así que un trabajo real
+  // igual se captura aunque `printers` esté vacío en este instante; lo
+  // único que se pierde mientras tanto es "conservar impresos" en una
+  // impresora que WMI no ve todavía, y eso se corrige solo en el próximo
+  // `rescanPrinters()`.
 
   const processed = new Set<number>();
   const pending = new Map<number, NodeJS.Timeout>();
-  let closed = false;
 
   async function processJob(jobId: number): Promise<void> {
     if (closed || processed.has(jobId)) return;
@@ -257,6 +325,7 @@ export async function startSpoolCapture(
       console.error(
         `[spool] sin permiso para leer ${config.spoolDir} — el agente tiene que correr como administrador o servicio (LocalSystem). Captura de spool inactiva.`,
       );
+      closed = true; // corta el reintento de impresoras: sin acceso a la carpeta no hay nada que vigilar
       return noop;
     }
     console.error("[spool] no se pudo listar la carpeta de spool:", err instanceof Error ? err.message : err);
@@ -271,12 +340,17 @@ export async function startSpoolCapture(
     });
   } catch (err) {
     console.error("[spool] no se pudo vigilar la carpeta de spool:", err instanceof Error ? err.message : err);
+    closed = true;
     return noop;
   }
 
   watcher.on("error", (err) => console.error("[spool] error del watcher:", err.message));
 
-  console.log(`[spool] vigilando ${config.spoolDir} — ${printers.length} impresora(s): ${printers.join(", ")}`);
+  console.log(
+    printers.length > 0
+      ? `[spool] vigilando ${config.spoolDir} — ${printers.length} impresora(s): ${printers.join(", ")}`
+      : `[spool] vigilando ${config.spoolDir} — ninguna impresora detectada todavía (reintentando en segundo plano)`,
+  );
 
   return {
     handle: {

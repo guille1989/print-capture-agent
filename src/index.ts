@@ -281,6 +281,27 @@ function startTcpCaptures(): void {
 }
 
 /**
+ * Refleja la lista de impresoras vigiladas (al arrancar, y cada vez que
+ * `startSpoolCapture` la actualiza por su reintento periódico) tanto en los
+ * "puertos" que ve el viewer como en el estado general del agente — 0
+ * impresoras detectadas es un problema real (cero captura posible) y antes
+ * quedaba invisible: el agente seguía reportándose "ok" mientras tanto.
+ */
+function applySpoolPorts(printers: string[]): void {
+  spoolPorts = printers.map((name) => ({
+    id: name,
+    name,
+    description: "Impresora (captura de spool)",
+    status: "idle",
+    lastActivityAt: new Date().toISOString(),
+  }));
+  pipe.setStatus(
+    printers.length > 0 ? "ok" : "error",
+    printers.length > 0 ? undefined : "No se detecta ninguna impresora para capturar — ver logs del agente",
+  );
+}
+
+/**
  * Arranca la captura de spool (el mecanismo general). Es async porque
  * consulta el spooler por WMI al inicializar, así que se espera antes del
  * primer `refreshPorts()` para que las impresoras ya salgan en el snapshot
@@ -290,15 +311,9 @@ async function initSpoolCapture(): Promise<void> {
   if (!config.captureEnabled || !config.spoolCaptureEnabled) return;
   const { handle, printers } = await startSpoolCapture((printerName, rawBase64) => {
     runDetached("handleCapturedTicket", () => handleCapturedTicket(printerName, rawBase64, "escpos"));
-  });
+  }, applySpoolPorts);
   captures.set(SPOOL_CAPTURE_ID, handle);
-  spoolPorts = printers.map((name) => ({
-    id: name,
-    name,
-    description: "Impresora (captura de spool)",
-    status: "idle",
-    lastActivityAt: new Date().toISOString(),
-  }));
+  applySpoolPorts(printers);
 }
 
 /**
