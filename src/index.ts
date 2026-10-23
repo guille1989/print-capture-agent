@@ -6,10 +6,12 @@ import { installTimestampedLogging } from "./log.js";
 installTimestampedLogging();
 
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 import { AgentPipeServer, PortInfo } from "print-capture-agent-pipe-server";
 
 import { capturePort } from "./capture/portCapture.js";
+import { startFolderCapture } from "./capture/folderCapture.js";
 import { startSpoolCapture } from "./capture/spoolCapture.js";
 import { captureTcp } from "./capture/tcpCapture.js";
 import { CaptureHandle } from "./capture/types.js";
@@ -35,12 +37,13 @@ interface RawTicket {
   port: string;
   capturedAt: string;
   // Captura serie/TCP: texto crudo. Captura de spool: `rawBase64` con los
-  // bytes ESC/POS (que pueden ser una imagen raster) y `rawEncoding`. Va
-  // siempre exactamente uno de los dos — sin `rawEncoding` la nube asume
-  // texto (compatibilidad con agentes anteriores).
+  // bytes ESC/POS (que pueden ser una imagen raster) y `rawEncoding`.
+  // Captura de carpeta: `rawBase64` con el XML de una factura electrónica y
+  // `rawEncoding: "ubl"`. Va siempre exactamente uno de los dos — sin
+  // `rawEncoding` la nube asume texto (compatibilidad con agentes anteriores).
   rawText?: string;
   rawBase64?: string;
-  rawEncoding?: "escpos";
+  rawEncoding?: "escpos" | "ubl";
 }
 
 const pipe = new AgentPipeServer({
@@ -72,16 +75,29 @@ const tcpPorts: PortInfo[] = config.tcpPeripherals.map((peripheral) => ({
  */
 let spoolPorts: PortInfo[] = [];
 
-/** Clave con la que vive el handle de la captura de spool en `captures` (no es un puerto real). */
+/**
+ * Carpetas de facturas vigiladas (ver `capture/folderCapture.ts`): se reportan
+ * como "puertos" junto con los serie, TCP e impresoras.
+ */
+let folderPorts: PortInfo[] = [];
+
+/**
+ * Las capturas que no son un puerto real viven en `captures` con una clave
+ * que empieza con `__` — `refreshPorts` no las cierra por "puerto desaparecido".
+ */
 const SPOOL_CAPTURE_ID = "__spool__";
+const FOLDER_CAPTURE_PREFIX = "__folder__:";
 
 async function handleCapturedTicket(
   rawPort: string,
   raw: string,
-  encoding: "text" | "escpos" = "text",
+  encoding: "text" | "escpos" | "ubl" = "text",
+  // Una factura de carpeta lleva la fecha de su archivo (útil al recuperar
+  // historia); el resto se captura "ahora".
+  capturedAtOverride?: string,
 ): Promise<void> {
   const id = randomUUID();
-  const capturedAt = new Date().toISOString();
+  const capturedAt = capturedAtOverride ?? new Date().toISOString();
 
   // El viewer se entera al toque de que "algo se capturó" — la descripción
   // y el monto van a aparecer solo en el dashboard de la nube, una vez
@@ -89,9 +105,9 @@ async function handleCapturedTicket(
   pipe.emitTicket({ id, timestamp: capturedAt, port: rawPort });
 
   const payload: RawTicket =
-    encoding === "escpos"
-      ? { ticketId: id, port: rawPort, capturedAt, rawBase64: raw, rawEncoding: "escpos" }
-      : { ticketId: id, port: rawPort, capturedAt, rawText: raw };
+    encoding === "text"
+      ? { ticketId: id, port: rawPort, capturedAt, rawText: raw }
+      : { ticketId: id, port: rawPort, capturedAt, rawBase64: raw, rawEncoding: encoding };
 
   await queue.enqueue(id, payload);
   console.log(`[agent] ticket capturado en ${rawPort} (${encoding}), encolado para parsear en la nube`);
@@ -241,7 +257,7 @@ async function refreshPorts(): Promise<void> {
     status: captures.has(port.id) ? ("active" as const) : ("idle" as const),
   }));
 
-  pipe.setPorts([...serialPorts, ...reportedTcpPorts, ...spoolPorts]);
+  pipe.setPorts([...serialPorts, ...reportedTcpPorts, ...spoolPorts, ...folderPorts]);
 
   // Arranca a escuchar los puertos serie nuevos que no estuviéramos ya
   // capturando. Gateado por ENABLE_CAPTURE: hasta no validar los supuestos
@@ -257,10 +273,11 @@ async function refreshPorts(): Promise<void> {
     }
   }
 
-  // Deja de escuchar los puertos serie que desaparecieron — los TCP y la
-  // captura de spool no entran acá porque no se "detectan" en cada vuelta.
+  // Deja de escuchar los puertos serie que desaparecieron — los TCP, la
+  // captura de spool y las carpetas no entran acá porque no se "detectan" en
+  // cada vuelta.
   for (const [portId, handle] of captures) {
-    if (portId === SPOOL_CAPTURE_ID) continue;
+    if (portId === SPOOL_CAPTURE_ID || portId.startsWith(FOLDER_CAPTURE_PREFIX)) continue;
     const stillSerial = detected.some((p) => p.id === portId);
     const isTcp = tcpPorts.some((p) => p.id === portId);
     if (!stillSerial && !isTcp) {
@@ -314,6 +331,48 @@ async function initSpoolCapture(): Promise<void> {
   }, applySpoolPorts);
   captures.set(SPOOL_CAPTURE_ID, handle);
   applySpoolPorts(printers);
+}
+
+/** Nombre con el que una carpeta se identifica en la nube y en el visor: ASCII imprimible, sin comillas ni barras (ver `ingest`). */
+function folderPortName(dir: string, taken: Set<string>): string {
+  const base = path.basename(dir) || dir;
+  const clean = base.replace(/[^\x20-\x7e]|["\\]/g, "").trim() || "facturas";
+  let name = `Carpeta ${clean}`.slice(0, 100);
+  for (let n = 2; taken.has(name); n++) name = `Carpeta ${clean} ${n}`.slice(0, 100);
+  taken.add(name);
+  return name;
+}
+
+/**
+ * Arranca la vigilancia de las carpetas de facturas electrónicas (XML) de
+ * `WATCH_FOLDERS`. Gateado por `ENABLE_CAPTURE`, igual que las demás capturas.
+ */
+function initFolderCaptures(): void {
+  if (!config.captureEnabled || config.watchFolders.length === 0) return;
+  const taken = new Set<string>();
+  folderPorts = [];
+  for (const dir of config.watchFolders) {
+    const port = folderPortName(dir, taken);
+    folderPorts.push({
+      id: port,
+      name: port,
+      description: "Carpeta de facturas electrónicas (XML)",
+      status: "idle",
+      lastActivityAt: new Date().toISOString(),
+    });
+    const handle = startFolderCapture({
+      dir,
+      port,
+      stateFile: config.folderStateFilePath,
+      pollMs: config.folderPollMs,
+      backfillSinceMs: config.folderBackfillSinceMs,
+      onInvoice: (portName, rawBase64, capturedAt) => {
+        runDetached("handleCapturedTicket", () => handleCapturedTicket(portName, rawBase64, "ubl", capturedAt));
+      },
+    });
+    captures.set(`${FOLDER_CAPTURE_PREFIX}${dir}`, handle);
+    console.log(`[agent] vigilando la carpeta de facturas ${dir} como "${port}"`);
+  }
 }
 
 /**
@@ -373,6 +432,13 @@ async function main(): Promise<void> {
   console.log(`[agent] cola cargada: ${queue.getPending().length} ticket(s) pendiente(s)`);
   pipe.start();
   startTcpCaptures();
+
+  try {
+    initFolderCaptures();
+  } catch (err) {
+    console.error("[agent] error inesperado arrancando la captura de carpetas:", err);
+    pipe.setStatus("error", "Error interno arrancando la captura de carpetas — ver logs del agente");
+  }
 
   try {
     await initSpoolCapture();

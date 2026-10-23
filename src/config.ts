@@ -60,9 +60,31 @@ function parseStringArray(raw: string | undefined): string[] {
   }
 }
 
+/**
+ * Lista de rutas desde una env var: JSON (`["D:\\\\Facturas"]`) o, más cómodo
+ * para un `.env` con rutas de Windows, separada por `;` (`D:\Facturas;E:\Otra`).
+ */
+function parsePathList(raw: string | undefined): string[] {
+  const value = raw?.trim();
+  if (!value) return [];
+  if (value.startsWith("[")) return parseStringArray(value);
+  return value.split(";").map((part) => part.trim()).filter(Boolean);
+}
+
+function optionalDate(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const value = Date.parse(raw);
+  if (Number.isNaN(value)) {
+    console.error(`[config] ${name} no es una fecha válida (${raw}), se ignora`);
+    return undefined;
+  }
+  return value;
+}
+
 export const config = {
   agentName: "print-capture-agent",
-  agentVersion: "0.3.1",
+  agentVersion: "0.4.0",
   cloudUploadUrl: process.env.CLOUD_UPLOAD_URL ?? "https://example.invalid/api/tickets",
   cloudApiKey: process.env.CLOUD_API_KEY,
   activationUrl: process.env.CLOUD_ACTIVATION_URL ?? apiSibling("agents/activate"),
@@ -148,4 +170,22 @@ export const config = {
    * alineado con el límite de `ingest` en la nube.
    */
   spoolMaxJobBytes: optionalNumber("SPOOL_MAX_JOB_BYTES") ?? 6 * 1024 * 1024,
+  /**
+   * Carpetas donde el ERP deja el XML de cada factura electrónica (UBL/DIAN),
+   * en vez de imprimir un ticket. Gateado por `captureEnabled`. Tiene que ser
+   * una ruta que el proceso del agente pueda leer: un servicio LocalSystem NO
+   * ve las letras de unidad de red mapeadas (`Z:`), así que o se instala el
+   * agente en el equipo que aloja la carpeta, o se usa la ruta UNC con un
+   * usuario de servicio con permiso de lectura.
+   */
+  watchFolders: parsePathList(process.env.WATCH_FOLDERS),
+  folderPollMs: optionalNumber("FOLDER_POLL_MS") ?? 15 * 1000,
+  /**
+   * Por default, al vigilar una carpeta por primera vez lo que ya hay se toma
+   * como historia y no se sube (una carpeta de ERP trae años de facturas).
+   * Con una fecha acá (`2026-10-01`) se suben también las ya existentes
+   * modificadas desde entonces.
+   */
+  folderBackfillSinceMs: optionalDate("FOLDER_BACKFILL_SINCE"),
+  folderStateFilePath: process.env.FOLDER_STATE_FILE ?? join(dirname(queueFilePath()), "folder-state.json"),
 };
