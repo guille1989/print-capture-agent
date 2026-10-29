@@ -84,11 +84,30 @@ function optionalDate(name: string): number | undefined {
 
 export const config = {
   agentName: "print-capture-agent",
-  agentVersion: "0.4.0",
+  agentVersion: "0.5.0",
   cloudUploadUrl: process.env.CLOUD_UPLOAD_URL ?? "https://example.invalid/api/tickets",
   cloudApiKey: process.env.CLOUD_API_KEY,
   activationUrl: process.env.CLOUD_ACTIVATION_URL ?? apiSibling("agents/activate"),
   heartbeatUrl: process.env.CLOUD_HEARTBEAT_URL ?? apiSibling("agents/heartbeat"),
+  /**
+   * Diagnósticos remotos de solo lectura: el operador pide un script de un
+   * catálogo fijo (`diagnostics/catalog.ts`), llega en la respuesta del
+   * heartbeat y el agente devuelve la salida. Sirve para seguir el estado del
+   * equipo sin pedir acceso remoto. Prendido por default;
+   * `ENABLE_REMOTE_DIAGNOSTICS=false` en el entorno de la máquina lo apaga.
+   */
+  remoteDiagnosticsEnabled: process.env.ENABLE_REMOTE_DIAGNOSTICS !== "false",
+  commandResultBaseUrl: process.env.CLOUD_COMMANDS_URL ?? apiSibling("agents/commands"),
+  diagnosticTimeoutMs: optionalNumber("DIAGNOSTIC_TIMEOUT_MS") ?? 60 * 1000,
+  diagnosticMaxOutputChars: 50_000,
+  /** Hostname de la API en la nube — el diagnóstico de red lo prueba. */
+  apiHost: (() => {
+    try {
+      return new URL(process.env.CLOUD_UPLOAD_URL ?? "https://example.invalid/api/tickets").hostname;
+    } catch {
+      return "";
+    }
+  })(),
   credentialsFilePath: process.env.AGENT_CREDENTIALS_FILE ?? "./data/credentials.json",
   heartbeatIntervalMs: Number(process.env.HEARTBEAT_INTERVAL_MS) || 60 * 1000,
   // La ubicación se administra normalmente desde InnoApp Web. Si esta
@@ -111,6 +130,8 @@ export const config = {
    * Por default, junto a la cola.
    */
   statusFilePath: process.env.STATUS_FILE ?? join(dirname(queueFilePath()), "status.json"),
+  /** Carpeta de datos del agente (cola, status, logs/) — la leen los diagnósticos. */
+  dataDir: dirname(queueFilePath()),
   idleThresholdMs: 5 * 60 * 1000,
   portScanIntervalMs: 10 * 1000,
   cloudSyncIntervalMs: 15 * 1000,

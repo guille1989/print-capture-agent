@@ -18,8 +18,10 @@ import { CaptureHandle } from "./capture/types.js";
 import { classifyFailure, computeBackoffMs } from "./cloud/backoff.js";
 import { uploadTicket } from "./cloud/uploadClient.js";
 import { ensureCredentials, type AgentCredentials } from "./cloud/credentials.js";
-import { sendHeartbeat } from "./cloud/heartbeatClient.js";
+import { sendCommandResult, sendHeartbeat, type PendingCommand } from "./cloud/heartbeatClient.js";
 import { config } from "./config.js";
+import { createCommandWorker } from "./diagnostics/commandWorker.js";
+import { runDiagnostic } from "./diagnostics/runner.js";
 import { scanPorts } from "./ports/portScanner.js";
 import { LocalQueue } from "./queue/localQueue.js";
 
@@ -51,6 +53,18 @@ const pipe = new AgentPipeServer({
   agentVersion: config.agentVersion,
   idleThresholdMs: config.idleThresholdMs,
   statusFilePath: config.statusFilePath,
+});
+
+const commandWorker = createCommandWorker({
+  run: (scriptId) =>
+    runDiagnostic(scriptId, {
+      // Solo datos de entorno, nunca la api-key: el script no la necesita.
+      env: { INNO_DATA_DIR: config.dataDir, INNO_API_HOST: config.apiHost },
+      timeoutMs: config.diagnosticTimeoutMs,
+      maxOutputChars: config.diagnosticMaxOutputChars,
+    }),
+  report: (commandId, result) =>
+    sendCommandResult(config.commandResultBaseUrl, credentials.apiKey, commandId, result, config.cloudUploadTimeoutMs),
 });
 
 const queue = new LocalQueue<RawTicket>(config.queueFilePath);
@@ -187,6 +201,16 @@ async function syncQueueToCloud(): Promise<void> {
   );
 }
 
+/**
+ * Los diagnósticos que el operador dejó pendientes llegan en la respuesta del
+ * heartbeat. Se corren aparte (sin esperarlos) para que un PowerShell lento no
+ * demore el próximo heartbeat — el agente se vería "caído" mientras tanto.
+ */
+function dispatchCommands(commands: PendingCommand[]): void {
+  if (!config.remoteDiagnosticsEnabled || commands.length === 0) return;
+  runDetached("diagnósticos remotos", () => commandWorker.enqueue(commands));
+}
+
 function scheduleHeartbeatLoop(): void {
   setTimeout(() => {
     sendHeartbeat(
@@ -195,6 +219,7 @@ function scheduleHeartbeatLoop(): void {
       { name: credentials.name, version: config.agentVersion, location: config.location },
       config.cloudUploadTimeoutMs,
     )
+      .then(dispatchCommands)
       .catch((err) => console.error("[agent] no se pudo enviar el heartbeat:", err))
       .finally(scheduleHeartbeatLoop);
   }, config.heartbeatIntervalMs);
@@ -209,11 +234,13 @@ async function sendInitialHeartbeatWithRetry(): Promise<void> {
   for (const delayMs of retryDelaysMs) {
     if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
     try {
-      await sendHeartbeat(
-        config.heartbeatUrl,
-        credentials.apiKey,
-        { name: credentials.name, version: config.agentVersion, location: config.location },
-        config.cloudUploadTimeoutMs,
+      dispatchCommands(
+        await sendHeartbeat(
+          config.heartbeatUrl,
+          credentials.apiKey,
+          { name: credentials.name, version: config.agentVersion, location: config.location },
+          config.cloudUploadTimeoutMs,
+        ),
       );
       return;
     } catch (err) {
