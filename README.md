@@ -114,9 +114,10 @@ impresos" al salir.
 
 **En una PC del negocio sin entorno de dev** (sin Node, sin el repo):
 `scripts/inspect-spool.cjs` es la misma herramienta en un solo archivo
-autocontenido, para correr con el `node.exe` que ya trae el instalador:
+autocontenido, para correr con el `node.exe` que ya trae el instalador
+(path canónico Program Files — ver [`docs/paths.md`](docs/paths.md)):
 ```powershell
-& "C:\Users\<usuario>\AppData\Local\InnoApp Agent\resources\agent\node.exe" `
+& "C:\Program Files\InnoApp Agent\resources\agent\node.exe" `
   "$env:USERPROFILE\Desktop\inspect-spool.cjs" --printer "EPSON TM-T20II Receipt" --seconds 120
 ```
 Deja la salida en una carpeta `inspect-spool-<fecha>` en el Escritorio.
@@ -144,10 +145,18 @@ contra fixtures sintéticas quedó en el historial de
 referencia de la forma que puede tomar el parser del lado servidor, pero
 ya no forma parte de este proyecto.
 
+## Versión
+
+La versión que el agent reporta en heartbeat / pipe sale de
+`package.json` → `"version"` (vía `src/version.ts`). El bundle piloto
+inyecta la misma con `AGENT_VERSION`. No hardcodear otro número en
+`config.ts`. Paths de instalación: [`docs/paths.md`](docs/paths.md).
+
 ## Variables de entorno
 
 | Variable | Default | Uso |
 |---|---|---|
+| `AGENT_VERSION` | *(lee `package.json`)* | override de la versión reportada; el build piloto la fija al bundlear |
 | `CLOUD_UPLOAD_URL` | `https://example.invalid/api/tickets` | endpoint al que se sube el texto crudo del ticket |
 | `CLOUD_API_KEY` | *(vacío)* | compatibilidad con instalaciones antiguas/no interactivas. En una instalación nueva se omite: el agente pide un código y guarda su propia key |
 | `CLOUD_ACTIVATION_URL` | derivada de `CLOUD_UPLOAD_URL` | `POST /agents/activate`, usado una sola vez al vincular el robot |
