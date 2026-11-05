@@ -1,6 +1,14 @@
 import type { UpdateSignal, UpdateStatus } from "./types.js";
 import { downloadToFile } from "./download.js";
-import { clearBootCheck, clearRolledBack, readBootCheck, readRolledBack, writePendingApply } from "./markers.js";
+import {
+  clearBootCheck,
+  clearRolledBack,
+  readBlocked,
+  readBootCheck,
+  readRolledBack,
+  writeBlocked,
+  writePendingApply,
+} from "./markers.js";
 import { otaPaths, type OtaPaths } from "./paths.js";
 import { normalizeSha256, verifyFileSha256 } from "./verify.js";
 
@@ -14,7 +22,15 @@ export interface OtaCoordinatorOptions {
   onStatus?: (status: UpdateStatus, error?: string) => void;
   /** Tras escribir pending-apply: por defecto sale para que el servicio aplique. */
   requestRestart?: () => void;
+  /** Reloj inyectable (tests). */
+  now?: () => number;
+  /** Cuánto no se reintenta una versión que se revirtió. Default 24 h. */
+  blockMs?: number;
 }
+
+/** Espera tras fallos consecutivos de la misma versión+hash (descarga, sha256…). */
+const FAILURE_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
+const DEFAULT_BLOCK_MS = 24 * 60 * 60_000;
 
 /**
  * Cliente OTA Fase 1: download → verify sha256 → pending-apply → exit.
@@ -28,6 +44,10 @@ export function createOtaCoordinator(options: OtaCoordinatorOptions) {
   let inflight: Promise<void> | undefined;
   let lastDesired: string | undefined;
   let bootChecked = false;
+  const now = options.now ?? (() => Date.now());
+  const blockMs = options.blockMs ?? DEFAULT_BLOCK_MS;
+  const failures = new Map<string, { count: number; nextAt: number }>();
+  const warnedBlocked = new Set<string>();
 
   function report(status: UpdateStatus, error?: string): void {
     options.onStatus?.(status, error);
@@ -37,9 +57,31 @@ export function createOtaCoordinator(options: OtaCoordinatorOptions) {
     const rolled = await readRolledBack(paths.rolledBack);
     if (rolled) {
       report("rolled_back", rolled.reason);
+      await blockVersion(rolled.fromVersion, rolled.reason);
       await clearRolledBack(paths.rolledBack);
     }
+  }
 
+  /**
+   * Una versión que arrancó mal y se revirtió no se vuelve a bajar: sin esto el
+   * agente la pediría en el siguiente heartbeat y entraría en un bucle
+   * descarga → swap → rollback. Persiste en disco porque el proceso se reinicia.
+   */
+  async function blockVersion(version: string, reason: string): Promise<void> {
+    if (!version || version === "unknown") return;
+    const blocked = await readBlocked(paths.blocked);
+    blocked[version] = { until: new Date(now() + blockMs).toISOString(), reason: reason.slice(0, 200) };
+    await writeBlocked(paths.blocked, blocked).catch((err) =>
+      console.error("[ota] no se pudo guardar blocked-versions:", err),
+    );
+    console.warn(`[ota] versión ${version} bloqueada por ${Math.round(blockMs / 3_600_000)} h tras rollback`);
+  }
+
+  async function isBlocked(version: string): Promise<boolean> {
+    const entry = (await readBlocked(paths.blocked))[version];
+    if (!entry) return false;
+    const until = Date.parse(entry.until);
+    return Number.isFinite(until) && until > now();
   }
 
   /**
@@ -77,6 +119,16 @@ export function createOtaCoordinator(options: OtaCoordinatorOptions) {
       report("error", "señal OTA incompleta");
       return;
     }
+    if (await isBlocked(signal.desiredVersion)) {
+      if (!warnedBlocked.has(signal.desiredVersion)) {
+        warnedBlocked.add(signal.desiredVersion);
+        console.warn(`[ota] ${signal.desiredVersion} está bloqueada (se revirtió antes) — se ignora la señal`);
+      }
+      return;
+    }
+    const failureKey = `${signal.desiredVersion}:${signal.sha256.toLowerCase()}`;
+    const failed = failures.get(failureKey);
+    if (failed && now() < failed.nextAt) return;
     if (lastDesired === signal.desiredVersion && inflight) return;
     lastDesired = signal.desiredVersion;
 
@@ -101,6 +153,9 @@ export function createOtaCoordinator(options: OtaCoordinatorOptions) {
         const message = err instanceof Error ? err.message : String(err);
         console.error("[ota] update falló:", message);
         report("error", message.slice(0, 500));
+        const count = (failures.get(failureKey)?.count ?? 0) + 1;
+        const wait = FAILURE_BACKOFF_MS[Math.min(count - 1, FAILURE_BACKOFF_MS.length - 1)];
+        failures.set(failureKey, { count, nextAt: now() + wait });
       } finally {
         inflight = undefined;
       }

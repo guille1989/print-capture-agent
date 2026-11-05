@@ -27,6 +27,9 @@ export interface BootCheckMarker {
   appliedAt: string;
 }
 
+/** Versiones que el agente no vuelve a intentar (fallaron y se revirtieron). */
+export type BlockedVersions = Record<string, { until: string; reason: string }>;
+
 export interface RolledBackMarker {
   fromVersion: string;
   toVersion: string | null;

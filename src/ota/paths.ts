@@ -15,6 +15,7 @@ export function otaPaths(dataDir: string, runtimeDir = process.env.AGENT_RUNTIME
     pendingApply: join(updatesDir, "pending-apply.json"),
     bootCheck: join(updatesDir, "boot-check.json"),
     rolledBack: join(updatesDir, "rolled-back.json"),
+    blocked: join(updatesDir, "blocked-versions.json"),
     prevInUpdates: join(updatesDir, "app.mjs.prev"),
     runtimeDir,
     runtimeApp: join(runtimeDir, "app.mjs"),
