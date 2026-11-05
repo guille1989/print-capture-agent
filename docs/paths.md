@@ -33,8 +33,17 @@ C:\ProgramData\InnoApp Agent\
     agent.log
     agent-error.log
     service.log
-  updates\                                  # reservado Fase 1 OTA (staging / .prev)
+  updates\
+    staging\app.mjs                         # download verificado (sha256)
+    pending-apply.json                      # el servicio hace swap + reinicio
+    boot-check.json                         # post-swap; agent reporta ok y lo borra
+    rolled-back.json                        # si el servicio restauró .prev
+    app.mjs.prev                            # último bueno (copia en ProgramData)
 ```
+
+OTA (Fase 1): el agent descarga y verifica; el **servicio** (`InnoAppAgent`)
+aplica el swap de `resources\agent\app.mjs` (libera el lock) y relanza el hijo.
+No usar el catálogo de diagnósticos PowerShell para update.
 
 El instalador crea ProgramData con ACL de modificación para `BUILTIN\Users`
 para que la activación desde la bandeja escriba credenciales sin UAC.
