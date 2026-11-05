@@ -24,7 +24,7 @@ test("coordinator: download + verify + pending-apply + restart", async () => {
   let restarted = false;
   const ota = createOtaCoordinator({
     dataDir,
-    agentVersion: "0.5.0",
+    agentVersion: "0.6.0",
     downloadTimeoutMs: 5_000,
     onStatus: (s) => statuses.push(s),
     requestRestart: () => {
@@ -61,7 +61,7 @@ test("coordinator: sha mismatch reporta error y no pide restart", async () => {
   let restarted = false;
   const ota = createOtaCoordinator({
     dataDir,
-    agentVersion: "0.5.0",
+    agentVersion: "0.6.0",
     downloadTimeoutMs: 5_000,
     onStatus: (s) => statuses.push(s),
     requestRestart: () => {
