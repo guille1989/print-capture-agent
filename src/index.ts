@@ -254,6 +254,9 @@ async function sendHeartbeatOnce(): Promise<void> {
   );
   // Solo limpiamos si el mismo report sigue en cola (no pisar uno más nuevo).
   if (report && pendingUpdateReport === report) pendingUpdateReport = undefined;
+  // Heartbeat aceptado = el agente nuevo llegó a la nube: recién ahí se
+  // confirma el update (si no, el servicio hace rollback a la versión previa).
+  await ota.confirmBoot().catch((err) => console.error("[ota] confirmar arranque:", err));
   handleHeartbeatResponse(result);
 }
 

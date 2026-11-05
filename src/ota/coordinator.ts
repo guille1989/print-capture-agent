@@ -19,12 +19,15 @@ export interface OtaCoordinatorOptions {
 /**
  * Cliente OTA Fase 1: download → verify sha256 → pending-apply → exit.
  * El swap + rollback lo hace el servicio Windows (evita lock de `app.mjs`).
+ * Tras un swap el servicio deja `boot-check.json`; el agente nuevo lo borra
+ * con `confirmBoot()` al lograr su primer heartbeat.
  */
 export function createOtaCoordinator(options: OtaCoordinatorOptions) {
   const enabled = options.enabled !== false;
   const paths: OtaPaths = otaPaths(options.dataDir, options.runtimeDir);
   let inflight: Promise<void> | undefined;
   let lastDesired: string | undefined;
+  let bootChecked = false;
 
   function report(status: UpdateStatus, error?: string): void {
     options.onStatus?.(status, error);
@@ -37,17 +40,29 @@ export function createOtaCoordinator(options: OtaCoordinatorOptions) {
       await clearRolledBack(paths.rolledBack);
     }
 
+  }
+
+  /**
+   * Confirma el arranque tras un update: borra `boot-check.json`. Hay que
+   * llamarlo SOLO cuando el agente ya demostró estar sano (primer heartbeat
+   * exitoso), no al arrancar: mientras el marker exista, el servicio revierte
+   * a `.prev` si el proceso muere o no confirma dentro de la gracia.
+   */
+  async function confirmBoot(): Promise<void> {
+    if (bootChecked) return;
     const boot = await readBootCheck(paths.bootCheck);
+    bootChecked = true;
     if (!boot) return;
     if (boot.version === options.agentVersion) {
       report("ok");
       await clearBootCheck(paths.bootCheck);
       return;
     }
-    // Arrancamos con otra versión de la que el servicio dejó en boot-check
-    // (bundle viejo o swap a medias): no limpiamos; el servicio puede rollback.
+    // Este proceso no es la versión que el servicio dejó en boot-check (el
+    // bundle publicado no coincide con su versión, o swap a medias): no se
+    // confirma, así el servicio revierte a `.prev` al vencer la gracia.
     console.warn(
-      `[ota] boot-check espera ${boot.version} pero este proceso es ${options.agentVersion}`,
+      `[ota] boot-check espera ${boot.version} pero este proceso es ${options.agentVersion} — sin confirmar`,
     );
   }
 
@@ -96,6 +111,7 @@ export function createOtaCoordinator(options: OtaCoordinatorOptions) {
   return {
     paths,
     consumeStartupMarkers,
+    confirmBoot,
     applySignal,
     /** Para tests / inspección. */
     isBusy: () => inflight !== undefined,

@@ -79,7 +79,7 @@ test("coordinator: sha mismatch reporta error y no pide restart", async () => {
   assert.ok(statuses.includes("error"));
 });
 
-test("coordinator: consumeStartupMarkers limpia boot-check de la versión actual", async () => {
+test("coordinator: arrancar NO confirma el update; solo confirmBoot() borra boot-check", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "ota-boot-"));
   await mkdir(join(dataDir, "updates"), { recursive: true });
   await writeFile(
@@ -96,7 +96,53 @@ test("coordinator: consumeStartupMarkers limpia boot-check de la versión actual
     requestRestart: () => undefined,
   });
 
+  // Al arrancar el marker debe seguir ahí: el agente aún no probó estar sano,
+  // y si muere ahora el servicio tiene que poder revertir.
   await ota.consumeStartupMarkers();
+  assert.deepEqual(statuses, []);
+  await readFile(join(dataDir, "updates", "boot-check.json"));
+
+  await ota.confirmBoot();
   assert.deepEqual(statuses, ["ok"]);
   await assert.rejects(readFile(join(dataDir, "updates", "boot-check.json")), /ENOENT/);
+
+  // Idempotente: otro heartbeat no vuelve a reportar.
+  await ota.confirmBoot();
+  assert.deepEqual(statuses, ["ok"]);
+});
+
+test("coordinator: confirmBoot no confirma si el bundle corre con otra versión", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "ota-boot-mismatch-"));
+  await mkdir(join(dataDir, "updates"), { recursive: true });
+  await writeFile(
+    join(dataDir, "updates", "boot-check.json"),
+    JSON.stringify({ version: "0.6.1", appliedAt: new Date().toISOString() }),
+  );
+
+  const statuses: string[] = [];
+  const ota = createOtaCoordinator({
+    dataDir,
+    agentVersion: "0.6.0", // el bundle publicado como 0.6.1 declara 0.6.0
+    downloadTimeoutMs: 1_000,
+    onStatus: (s) => statuses.push(s),
+    requestRestart: () => undefined,
+  });
+
+  await ota.confirmBoot();
+  assert.deepEqual(statuses, []);
+  await readFile(join(dataDir, "updates", "boot-check.json")); // sigue: el servicio revertirá
+});
+
+test("coordinator: confirmBoot sin boot-check no hace nada", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "ota-boot-none-"));
+  const statuses: string[] = [];
+  const ota = createOtaCoordinator({
+    dataDir,
+    agentVersion: "0.6.0",
+    downloadTimeoutMs: 1_000,
+    onStatus: (s) => statuses.push(s),
+    requestRestart: () => undefined,
+  });
+  await ota.confirmBoot();
+  assert.deepEqual(statuses, []);
 });

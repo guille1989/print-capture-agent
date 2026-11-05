@@ -36,7 +36,7 @@ C:\ProgramData\InnoApp Agent\
   updates\
     staging\app.mjs                         # download verificado (sha256)
     pending-apply.json                      # el servicio hace swap + reinicio
-    boot-check.json                         # post-swap; agent reporta ok y lo borra
+    boot-check.json                         # post-swap; el agent lo borra tras su 1er heartbeat OK (si no, el servicio revierte)
     rolled-back.json                        # si el servicio restauró .prev
     app.mjs.prev                            # último bueno (copia en ProgramData)
 ```
