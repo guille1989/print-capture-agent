@@ -18,10 +18,12 @@ import { CaptureHandle } from "./capture/types.js";
 import { classifyFailure, computeBackoffMs } from "./cloud/backoff.js";
 import { uploadTicket } from "./cloud/uploadClient.js";
 import { ensureCredentials, type AgentCredentials } from "./cloud/credentials.js";
-import { sendCommandResult, sendHeartbeat, type PendingCommand } from "./cloud/heartbeatClient.js";
+import { sendCommandResult, sendHeartbeat, type HeartbeatResult, type PendingCommand } from "./cloud/heartbeatClient.js";
 import { config } from "./config.js";
 import { createCommandWorker } from "./diagnostics/commandWorker.js";
 import { runDiagnostic } from "./diagnostics/runner.js";
+import { createOtaCoordinator } from "./ota/coordinator.js";
+import type { UpdateStatus } from "./ota/types.js";
 import { scanPorts } from "./ports/portScanner.js";
 import { LocalQueue } from "./queue/localQueue.js";
 
@@ -71,6 +73,19 @@ const queue = new LocalQueue<RawTicket>(config.queueFilePath);
 const captures = new Map<string, CaptureHandle>();
 const knownPortIds = new Set<string>();
 let credentials: AgentCredentials;
+
+/** Estado OTA a reportar en el próximo heartbeat (se limpia tras enviarlo con éxito). */
+let pendingUpdateReport: { updateStatus: UpdateStatus; updateError?: string } | undefined;
+
+const ota = createOtaCoordinator({
+  dataDir: config.dataDir,
+  agentVersion: config.agentVersion,
+  downloadTimeoutMs: Math.max(config.cloudUploadTimeoutMs, 60_000),
+  enabled: process.env.ENABLE_OTA !== "false",
+  onStatus: (updateStatus, updateError) => {
+    pendingUpdateReport = updateError !== undefined ? { updateStatus, updateError } : { updateStatus };
+  },
+});
 
 /** Los periféricos TCP son estáticos (no se "descubren"), así que se
  * reportan siempre junto con los puertos serie detectados dinámicamente. */
@@ -205,21 +220,46 @@ async function syncQueueToCloud(): Promise<void> {
  * Los diagnósticos que el operador dejó pendientes llegan en la respuesta del
  * heartbeat. Se corren aparte (sin esperarlos) para que un PowerShell lento no
  * demore el próximo heartbeat — el agente se vería "caído" mientras tanto.
+ * La señal OTA sigue el mismo patrón (download no bloquea el loop).
  */
 function dispatchCommands(commands: PendingCommand[]): void {
   if (!config.remoteDiagnosticsEnabled || commands.length === 0) return;
   runDetached("diagnósticos remotos", () => commandWorker.enqueue(commands));
 }
 
+function handleHeartbeatResponse(result: HeartbeatResult): void {
+  dispatchCommands(result.commands);
+  if (result.update) {
+    runDetached("ota", () => ota.applySignal(result.update!));
+  }
+}
+
+function heartbeatPayload() {
+  const report = pendingUpdateReport;
+  return {
+    name: credentials.name,
+    version: config.agentVersion,
+    location: config.location,
+    ...(report ? { updateStatus: report.updateStatus, updateError: report.updateError } : {}),
+  };
+}
+
+async function sendHeartbeatOnce(): Promise<void> {
+  const report = pendingUpdateReport;
+  const result = await sendHeartbeat(
+    config.heartbeatUrl,
+    credentials.apiKey,
+    heartbeatPayload(),
+    config.cloudUploadTimeoutMs,
+  );
+  // Solo limpiamos si el mismo report sigue en cola (no pisar uno más nuevo).
+  if (report && pendingUpdateReport === report) pendingUpdateReport = undefined;
+  handleHeartbeatResponse(result);
+}
+
 function scheduleHeartbeatLoop(): void {
   setTimeout(() => {
-    sendHeartbeat(
-      config.heartbeatUrl,
-      credentials.apiKey,
-      { name: credentials.name, version: config.agentVersion, location: config.location },
-      config.cloudUploadTimeoutMs,
-    )
-      .then(dispatchCommands)
+    sendHeartbeatOnce()
       .catch((err) => console.error("[agent] no se pudo enviar el heartbeat:", err))
       .finally(scheduleHeartbeatLoop);
   }, config.heartbeatIntervalMs);
@@ -234,14 +274,7 @@ async function sendInitialHeartbeatWithRetry(): Promise<void> {
   for (const delayMs of retryDelaysMs) {
     if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
     try {
-      dispatchCommands(
-        await sendHeartbeat(
-          config.heartbeatUrl,
-          credentials.apiKey,
-          { name: credentials.name, version: config.agentVersion, location: config.location },
-          config.cloudUploadTimeoutMs,
-        ),
-      );
+      await sendHeartbeatOnce();
       return;
     } catch (err) {
       lastError = err;
@@ -445,6 +478,7 @@ async function main(): Promise<void> {
   // una forma segura de seguir — se deja que `main().catch()` de abajo
   // termine el proceso. Todo lo demás (escanear puertos, capturar,
   // sincronizar) usa `runDetached` para no arrastrar eso al arranque.
+  await ota.consumeStartupMarkers().catch((err) => console.error("[ota] markers de arranque:", err));
   credentials = await ensureCredentials({
     path: config.credentialsFilePath,
     envApiKey: config.cloudApiKey,
