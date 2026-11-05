@@ -1,6 +1,11 @@
 # Etapa B - corre el agente nuevo (captura de spool -> escpos) en la PC de
 # Empanadas, elevado, para probar el circuito real sin armar el instalador.
 #
+# Paths canónicos (piloto / producción):
+#   Runtime:  C:\Program Files\InnoApp Agent\resources\agent\
+#   Datos:    C:\ProgramData\InnoApp Agent\
+# (El layout viejo bajo %LOCALAPPDATA% / AppData del viewer ya no aplica.)
+#
 # ANTES: copiar 'app.mjs' al Escritorio de esta PC.
 # CORRER: PowerShell "como administrador":
 #   powershell -ExecutionPolicy Bypass -File run-agent-etapa-b.ps1
@@ -10,9 +15,20 @@
 param([switch]$Restore)
 $ErrorActionPreference = "Stop"
 
-$node = (Get-ChildItem "C:\Users\*\AppData\Local\InnoApp Agent\resources\agent\node.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-if (-not $node) { Write-Host "No encuentro node.exe de InnoApp Agent." -ForegroundColor Red; exit 1 }
-$runtime = Split-Path $node
+$runtime = "C:\Program Files\InnoApp Agent\resources\agent"
+$node = Join-Path $runtime "node.exe"
+if (-not (Test-Path $node)) {
+  # Fallback legacy (instalaciones previas al layout Program Files).
+  $legacy = Get-ChildItem "C:\Users\*\AppData\Local\InnoApp Agent\resources\agent\node.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($legacy) {
+    $node = $legacy.FullName
+    $runtime = Split-Path $node
+    Write-Host "AVISO: runtime legacy en AppData. El path canónico es Program Files." -ForegroundColor Yellow
+  } else {
+    Write-Host "No encuentro node.exe en Program Files\InnoApp Agent\resources\agent." -ForegroundColor Red
+    exit 1
+  }
+}
 $appMjs  = Join-Path $runtime "app.mjs"
 $backup  = Join-Path $runtime "app.mjs.orig"
 Write-Host ("Runtime: " + $runtime)
@@ -35,9 +51,19 @@ if (-not (Test-Path $backup)) { Copy-Item $appMjs $backup -Force; Write-Host ("B
 Copy-Item $new $appMjs -Force
 Write-Host ("app.mjs nuevo copiado: " + (Get-Item $appMjs).Length + " bytes") -ForegroundColor Green
 
-# 3. arrancar el agente elevado
-$data = Join-Path $env:APPDATA "com.innoapp.agentstatusviewer"
-if (-not (Test-Path (Join-Path $data "credentials.json"))) { Write-Host ("No hay credentials.json en " + $data + " -- esta PC no esta activada.") -ForegroundColor Red; exit 1 }
+# 3. arrancar el agente elevado — datos en ProgramData (layout piloto)
+$data = "C:\ProgramData\InnoApp Agent"
+if (-not (Test-Path (Join-Path $data "credentials.json"))) {
+  # Fallback legacy del viewer Tauri en AppData del usuario.
+  $legacyData = Join-Path $env:APPDATA "com.innoapp.agentstatusviewer"
+  if (Test-Path (Join-Path $legacyData "credentials.json")) {
+    $data = $legacyData
+    Write-Host "AVISO: credentials en AppData legacy. El path canónico es ProgramData." -ForegroundColor Yellow
+  } else {
+    Write-Host ("No hay credentials.json en " + $data + " -- esta PC no esta activada.") -ForegroundColor Red
+    exit 1
+  }
+}
 
 $env:CLOUD_UPLOAD_URL       = "https://uqa4ti7fwi.execute-api.us-east-1.amazonaws.com/prod/tickets"
 $env:AGENT_CREDENTIALS_FILE = Join-Path $data "credentials.json"
