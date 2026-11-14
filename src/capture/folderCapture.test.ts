@@ -4,7 +4,8 @@ import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { classifyInvoiceXml, createFolderPoller, stripContactBlocks } from "./folderCapture.js";
+import { classifyInvoicePdf, classifyInvoiceXml, createFolderPoller, stripContactBlocks } from "./folderCapture.js";
+import { buildPdf, invoiceLines } from "./pdfFixture.js";
 
 const SALE_XML =
   '<?xml version="1.0" encoding="UTF-8"?><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" ' +
@@ -36,6 +37,8 @@ test("stripContactBlocks: quita teléfono y correo del cliente y deja el resto i
 interface Captured {
   port: string;
   xml: string;
+  /** Lo mismo que `xml` pero leído como UTF-8 (el texto de un PDF). */
+  utf8: string;
   capturedAt: string;
 }
 
@@ -45,14 +48,14 @@ async function setup() {
   await import("node:fs/promises").then((fs) => fs.mkdir(dir));
   const stateFile = path.join(root, "state", "folder-state.json");
   const captured: Captured[] = [];
-  const make = (extra: { backfillSinceMs?: number } = {}) =>
+  const make = (extra: { backfillSinceMs?: number; kind?: "xml" | "pdf" } = {}) =>
     createFolderPoller({
       dir,
       port: "Carpeta UNFE",
       stateFile,
       settleMs: 0,
       onInvoice: (port, rawBase64, capturedAt) =>
-        captured.push({ port, xml: Buffer.from(rawBase64, "base64").toString("latin1"), capturedAt }),
+        captured.push({ port, xml: Buffer.from(rawBase64, "base64").toString("latin1"), utf8: Buffer.from(rawBase64, "base64").toString("utf-8"), capturedAt }),
       ...extra,
     });
   const put = async (name: string, content: string | Buffer, mtime?: Date) => {
@@ -151,7 +154,7 @@ test("espera a que el archivo lleve un rato sin modificarse", async () => {
       port: "Carpeta UNFE",
       stateFile: path.join(t.root, "state.json"),
       settleMs: 60_000,
-      onInvoice: (_p, b64, at) => t.captured.push({ port: "x", xml: b64, capturedAt: at }),
+      onInvoice: (_p, b64, at) => t.captured.push({ port: "x", xml: b64, utf8: b64, capturedAt: at }),
     });
     await poller.pollOnce();
     await t.put("a.xml", SALE_XML); // mtime = ahora
@@ -214,6 +217,54 @@ test("una carpeta que no responde no tira nada abajo y se recupera después", as
       onInvoice: () => assert.fail("no debía subir nada"),
     });
     await poller.pollOnce();
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("classifyInvoicePdf: solo las facturas de venta (FE) completas; ignora notas, soporte y archivos a medias", () => {
+  const pdf = buildPdf(invoiceLines());
+  assert.equal(classifyInvoicePdf("01001FE0384780089032330000.PDF", pdf).kind, "sale");
+  assert.equal(classifyInvoicePdf("01001NE0018430090027696000.PDF", pdf).kind, "ignore");
+  assert.equal(classifyInvoicePdf("01001DC0000010031954400000.PDF", pdf).kind, "ignore");
+  assert.equal(classifyInvoicePdf("01001FE0384780089032330000.PDF", Buffer.from("no es pdf")).kind, "ignore");
+  // Sin el `%%EOF` del final el ERP todavía lo está escribiendo.
+  assert.equal(classifyInvoicePdf("01001FE0384780089032330000.PDF", buildPdf(invoiceLines(), { trailer: false })).kind, "incomplete");
+});
+
+test("carpeta de PDF: sube el TEXTO de la factura (no el archivo) y deja afuera las notas", async () => {
+  const t = await setup();
+  try {
+    const poller = t.make({ kind: "pdf" });
+    await poller.pollOnce(); // baseline vacío
+    await t.put("01001FE0384780089032330000.PDF", buildPdf(invoiceLines()));
+    await t.put("01001NE0018430090027696000.PDF", buildPdf(invoiceLines()));
+    await t.put("01001FE0384780089032330000.xml", SALE_XML); // un XML en la carpeta de PDF no cuenta
+    await poller.pollOnce();
+    await poller.pollOnce();
+
+    assert.equal(t.captured.length, 1);
+    assert.equal(t.captured[0].port, "Carpeta UNFE");
+    assert.ok(t.captured[0].utf8.includes("Vendedor: 1144047585"));
+    assert.ok(t.captured[0].utf8.includes("RIOS NOREÑA DANIELA"));
+    // Es texto, no el PDF.
+    assert.ok(!t.captured[0].utf8.startsWith("%PDF"));
+    assert.ok(t.captured[0].utf8.length < 4000);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("carpeta de PDF: un PDF ilegible se descarta una vez y no se reintenta", async () => {
+  const t = await setup();
+  try {
+    const poller = t.make({ kind: "pdf" });
+    await poller.pollOnce();
+    // Empieza como PDF y termina en %%EOF, pero no tiene páginas.
+    await t.put("01001FE0000010000000000000.PDF", Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n"));
+    await poller.pollOnce();
+    await poller.pollOnce();
+    assert.equal(t.captured.length, 0);
   } finally {
     await t.cleanup();
   }

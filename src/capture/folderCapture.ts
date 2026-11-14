@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { extractPdfLines, PdfTextError } from "./pdfText.js";
 import type { CaptureHandle } from "./types.js";
 
 /**
@@ -60,6 +61,24 @@ export function stripContactBlocks(text: string): string {
   return text.replace(/<((?:[\w.-]+:)?)Contact\b[^>]*>[\s\S]*?<\/\1Contact\s*>/g, "");
 }
 
+/**
+ * Las facturas de venta del ERP se llaman `01001FE<consecutivo><NIT cliente>000`;
+ * en la misma carpeta de PDF hay notas crédito (`NE`), documentos soporte (`DC`)
+ * y otros que no son una venta y no se suben.
+ */
+const SALE_PDF_NAME = /^\d{5}FE\d/i;
+
+/**
+ * Decide, por el nombre y el final del archivo, si un PDF es una factura de venta
+ * completa. Un PDF a medio escribir no trae `%%EOF` al final.
+ */
+export function classifyInvoicePdf(name: string, bytes: Buffer): InvoiceVerdict {
+  if (!SALE_PDF_NAME.test(name)) return { kind: "ignore", reason: "no es una factura de venta (por su nombre)" };
+  if (bytes.subarray(0, 5).toString("latin1") !== "%PDF-") return { kind: "ignore", reason: "no es un PDF" };
+  if (!bytes.subarray(Math.max(0, bytes.length - 1024)).toString("latin1").includes("%%EOF")) return { kind: "incomplete" };
+  return { kind: "sale" };
+}
+
 interface FolderState {
   version: 1;
   folders: Record<string, { known: string[] }>;
@@ -90,7 +109,13 @@ export interface FolderCaptureOptions {
   /** Ver `config.folderBackfillSinceMs`. */
   backfillSinceMs?: number;
   settleMs?: number;
-  /** `rawBase64` es el XML (sin los bloques de contacto) y `capturedAt` la fecha de modificación del archivo. */
+  /**
+   * Qué se vigila: los XML de las facturas (por defecto) o sus PDF. Con `"xml"`,
+   * `rawBase64` es el XML (sin los bloques de contacto); con `"pdf"`, el TEXTO del
+   * PDF — una línea por renglón impreso — y no el archivo: pesa ~6 KB en vez de ~100 KB
+   * y la nube solo lo lee, no lo guarda. `capturedAt` es la fecha de modificación del archivo.
+   */
+  kind?: "xml" | "pdf";
   onInvoice: (port: string, rawBase64: string, capturedAt: string) => void;
 }
 
@@ -101,6 +126,8 @@ export interface FolderPoller {
 /** La lógica de un sondeo, separada del temporizador para poder probarla. */
 export function createFolderPoller(options: FolderCaptureOptions): FolderPoller {
   const { dir, port, stateFile, backfillSinceMs, onInvoice } = options;
+  const kind = options.kind ?? "xml";
+  const extension = kind === "pdf" ? /\.pdf$/i : /\.xml$/i;
   const settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
   const incompleteAttempts = new Map<string, number>();
   const warned = new Set<string>();
@@ -115,7 +142,7 @@ export function createFolderPoller(options: FolderCaptureOptions): FolderPoller 
   async function pollOnce(): Promise<void> {
     let names: string[];
     try {
-      names = (await readdir(dir)).filter((name) => /\.xml$/i.test(name)).sort();
+      names = (await readdir(dir)).filter((name) => extension.test(name)).sort();
     } catch (err) {
       // Una carpeta de red que no responde no es motivo para tirar nada abajo:
       // se reintenta en el próximo sondeo.
@@ -155,8 +182,24 @@ export function createFolderPoller(options: FolderCaptureOptions): FolderPoller 
         const info = await stat(file);
         if (settleMs > 0 && Date.now() - info.mtimeMs < settleMs) continue; // puede estar escribiéndose todavía
 
-        const text = (await readFile(file)).toString("latin1");
-        const verdict = classifyInvoiceXml(text);
+        const bytes = await readFile(file);
+        const text = kind === "xml" ? bytes.toString("latin1") : "";
+        let verdict = kind === "pdf" ? classifyInvoicePdf(name, bytes) : classifyInvoiceXml(text);
+
+        // El texto del PDF se lee acá, no en la nube: así no viaja ni se encola el archivo.
+        let payload: string | undefined;
+        if (verdict.kind === "sale") {
+          if (kind === "pdf") {
+            try {
+              payload = Buffer.from(extractPdfLines(bytes).join("\n"), "utf-8").toString("base64");
+            } catch (err) {
+              if (!(err instanceof PdfTextError)) throw err;
+              verdict = { kind: "ignore", reason: `PDF ilegible: ${err.message}` };
+            }
+          } else {
+            payload = Buffer.from(stripContactBlocks(text), "latin1").toString("base64");
+          }
+        }
 
         if (verdict.kind === "incomplete") {
           const attempts = (incompleteAttempts.get(name) ?? 0) + 1;
@@ -165,9 +208,9 @@ export function createFolderPoller(options: FolderCaptureOptions): FolderPoller 
           console.warn(`[folder] ${name}: sigue incompleto tras ${attempts} intentos, se descarta`);
         } else if (verdict.kind === "ignore") {
           console.log(`[folder] ${name} ignorado: ${verdict.reason}`);
-        } else {
-          onInvoice(port, Buffer.from(stripContactBlocks(text), "latin1").toString("base64"), info.mtime.toISOString());
-          console.log(`[folder] ${name}: factura capturada`);
+        } else if (payload !== undefined) {
+          onInvoice(port, payload, info.mtime.toISOString());
+          console.log(`[folder] ${name}: ${kind === "pdf" ? "PDF de factura leído" : "factura capturada"}`);
         }
         known.add(name);
         changed = true;

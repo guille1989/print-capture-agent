@@ -43,11 +43,12 @@ interface RawTicket {
   // Captura serie/TCP: texto crudo. Captura de spool: `rawBase64` con los
   // bytes ESC/POS (que pueden ser una imagen raster) y `rawEncoding`.
   // Captura de carpeta: `rawBase64` con el XML de una factura electrónica y
-  // `rawEncoding: "ubl"`. Va siempre exactamente uno de los dos — sin
+  // `rawEncoding: "ubl"`; con `"pdftext"`, el texto (no el archivo) del PDF de una factura.
+  // Va siempre exactamente uno de los dos — sin
   // `rawEncoding` la nube asume texto (compatibilidad con agentes anteriores).
   rawText?: string;
   rawBase64?: string;
-  rawEncoding?: "escpos" | "ubl";
+  rawEncoding?: "escpos" | "ubl" | "pdftext";
 }
 
 const pipe = new AgentPipeServer({
@@ -120,7 +121,7 @@ const FOLDER_CAPTURE_PREFIX = "__folder__:";
 async function handleCapturedTicket(
   rawPort: string,
   raw: string,
-  encoding: "text" | "escpos" | "ubl" = "text",
+  encoding: "text" | "escpos" | "ubl" | "pdftext" = "text",
   // Una factura de carpeta lleva la fecha de su archivo (útil al recuperar
   // historia); el resto se captura "ahora".
   capturedAtOverride?: string,
@@ -130,8 +131,9 @@ async function handleCapturedTicket(
 
   // El viewer se entera al toque de que "algo se capturó" — la descripción
   // y el monto van a aparecer solo en el dashboard de la nube, una vez
-  // que el servidor lo parsee.
-  pipe.emitTicket({ id, timestamp: capturedAt, port: rawPort });
+  // que el servidor lo parsee. El PDF de una factura no cuenta: es la misma
+  // venta que su XML, solo aporta el vendedor.
+  if (encoding !== "pdftext") pipe.emitTicket({ id, timestamp: capturedAt, port: rawPort });
 
   const payload: RawTicket =
     encoding === "text"
@@ -411,30 +413,37 @@ function folderPortName(dir: string, taken: Set<string>): string {
  * `WATCH_FOLDERS`. Gateado por `ENABLE_CAPTURE`, igual que las demás capturas.
  */
 function initFolderCaptures(): void {
-  if (!config.captureEnabled || config.watchFolders.length === 0) return;
+  const targets = [
+    ...config.watchFolders.map((dir) => ({ dir, kind: "xml" as const })),
+    ...config.watchPdfFolders.map((dir) => ({ dir, kind: "pdf" as const })),
+  ];
+  if (!config.captureEnabled || targets.length === 0) return;
   const taken = new Set<string>();
   folderPorts = [];
-  for (const dir of config.watchFolders) {
+  for (const { dir, kind } of targets) {
     const port = folderPortName(dir, taken);
     folderPorts.push({
       id: port,
       name: port,
-      description: "Carpeta de facturas electrónicas (XML)",
+      description: kind === "pdf" ? "Carpeta de PDF de facturas (vendedor)" : "Carpeta de facturas electrónicas (XML)",
       status: "idle",
       lastActivityAt: new Date().toISOString(),
     });
     const handle = startFolderCapture({
       dir,
       port,
+      kind,
       stateFile: config.folderStateFilePath,
       pollMs: config.folderPollMs,
       backfillSinceMs: config.folderBackfillSinceMs,
       onInvoice: (portName, rawBase64, capturedAt) => {
-        runDetached("handleCapturedTicket", () => handleCapturedTicket(portName, rawBase64, "ubl", capturedAt));
+        runDetached("handleCapturedTicket", () =>
+          handleCapturedTicket(portName, rawBase64, kind === "pdf" ? "pdftext" : "ubl", capturedAt),
+        );
       },
     });
     captures.set(`${FOLDER_CAPTURE_PREFIX}${dir}`, handle);
-    console.log(`[agent] vigilando la carpeta de facturas ${dir} como "${port}"`);
+    console.log(`[agent] vigilando la carpeta de ${kind === "pdf" ? "PDF de facturas" : "facturas"} ${dir} como "${port}"`);
   }
 }
 

@@ -202,6 +202,8 @@ export const config = {
    * usuario de servicio con permiso de lectura.
    */
   watchFolders: parsePathList(process.env.WATCH_FOLDERS),
+  // Carpetas con los PDF de esas facturas (en Alamo, `UNFE\PDF`): de ahí sale el vendedor, que el XML no trae.
+  watchPdfFolders: parsePathList(process.env.WATCH_PDF_FOLDERS),
   folderPollMs: optionalNumber("FOLDER_POLL_MS") ?? 15 * 1000,
   /**
    * Por default, al vigilar una carpeta por primera vez lo que ya hay se toma
